@@ -1,0 +1,127 @@
+import torch
+import numpy as np
+import torch.nn.functional as F
+from functools import cmp_to_key
+from torch.distributions.multivariate_normal import MultivariateNormal
+
+d = 2
+def H(arr,forward):
+    return forward(arr)
+
+def S(x):
+    r = 1
+    return torch.exp(r*x)
+
+def H2(arr):
+    d = len(arr)
+    val = 0
+    prod = 1
+    for i in range(d):
+        val += (arr[i]**2) / 4000
+        prod *= np.cos(arr[i] / np.sqrt(i + 1))
+    return -1 * (val - prod + 1)
+
+class pdf:
+    def __init__(self):
+        self.mu = torch.zeros(d)
+        self.sigma = 10*torch.eye(d)
+        self.PDF = MultivariateNormal(self.mu, self.sigma)
+
+    def f(self, x):
+        return self.PDF.log_prob(x)
+
+    def update(self, newMu, newSigma):
+        self.mu = newMu
+        self.sigma = newSigma
+        for i in range(d):
+          for j in range(d):
+            if i!=j:
+              self.sigma[i][j] = 0
+        self.PDF = MultivariateNormal(self.mu, self.sigma)
+
+def I(x, gamma):
+    return x if x >= gamma else 0
+
+def calculate_expection(X, func, k, pdf_function, gamma):
+    sum= 0
+    count =0
+    for x in X:
+        sum += func(x, k, pdf_function, gamma)
+        count +=1
+    return sum / count
+
+def update_mu(X, gamma, k, pdf_function, forward):
+    k = 1
+    def func_numerator(x,k,pdf_function, gamma):
+      return (S(H(x,forward))**k) * I(H(x,forward),gamma) * x
+    def func_denominator(x,k,pdf_function, gamma):
+      return ((S(H(x,forward))**k) * I(H(x,forward),gamma))
+    return calculate_expection(X, func_numerator, k, pdf_function, gamma) / calculate_expection(X, func_denominator, k, pdf_function, gamma)
+
+def update_sigma(X, gamma, k, pdf_function, forward):
+    k = 1
+    def func_numerator(x,k,pdf_function,gamma):
+      matrix1 = torch.unsqueeze(x-pdf_function.mu,dim=0)
+      matrix2 = torch.reshape(matrix1,(d,1))
+      return (S(H(x,forward))**k) * I(H(x,forward),gamma) *(torch.matmul(matrix2,matrix1))
+    def func_denominator(x,k,pdf_function,gamma):
+      return ((S(H(x,forward))**k) * I(H(x,forward),gamma))
+    arr = calculate_expection(X, func_numerator, k, pdf_function, gamma) / calculate_expection(X, func_denominator, k, pdf_function, gamma)
+    return arr
+
+def return_random_iids2(low, high, N):
+    randomIidsX = torch.tensor(np.random.uniform(low[0], high[0], N))
+    randomIidsY = torch.tensor(np.random.uniform(low[1], high[1], N))
+    randomIids = [torch.tensor([randomIidsX[i].item(), randomIidsY[i].item()]) for i in range(N)]
+    return randomIids
+
+def return_random_iids(N, pdf):
+    arr = []
+    for i in range(N):
+      arr.append(pdf.PDF.sample().tolist())
+    return torch.tensor(arr)
+    # return torch.tensor(np.random.multivariate_normal(pdf_function.mu.numpy(), pdf_function.sigma.numpy(), N))
+
+
+low = torch.tensor([-2, -2])
+high = torch.tensor([5, 5])
+N = 1000
+quantile = 0.08
+K = 5
+gamma = -1000
+epsilon = 0.001
+alpha = 1.001
+
+def compare(X, Y):
+    if X[0] < Y[0]:
+        return -1
+    return 1
+
+def mras(arch,predict_lambda, forward):
+    randomIids = arch
+    alpha = predict_lambda
+    # Set the dimension too
+    # d = arch[0].something
+    pdf = pdf()
+    for k in range(1, K + 1):
+        if randomIids == None:
+            randomIids = return_random_iids(N, pdf)
+        HValues = [H(i,forward) for i in randomIids]
+        HValues_X = [[H(i,forward), i] for i in randomIids]
+        sortedHValues = sorted(HValues)
+        sortedXValues = sorted(HValues_X, key=cmp_to_key(compare))
+        XArray = [temp_arr[1] for temp_arr in sortedXValues]
+        quantileIndex = int((1 - quantile) * N)
+        currGamma = sortedHValues[quantileIndex]
+        if k == 1 or currGamma >= gamma + (epsilon / 2):
+            gamma = currGamma
+            ind = HValues.index(gamma)
+        else:
+            gamma = currGamma
+            N = int(alpha * N)
+        pdf.update(update_mu(XArray, gamma, k, pdf, forward), update_sigma(XArray, gamma, k, pdf, forward))
+        print(pdf.mu, pdf.sigma)
+        print(H(pdf.mu, forward))
+        randomIids = None
+    
+    return return_random_iids(N, pdf)

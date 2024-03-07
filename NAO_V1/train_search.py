@@ -616,6 +616,20 @@ def nao_infer(queue, model, step, direction='+'):
         new_arch_list.extend(new_arch.data.squeeze().tolist())
     return new_arch_list
 
+def nao_infer_btp(queue, model, step, direction='+'):
+    new_arch_list = []
+    model.eval()
+    encoder_input_list = []
+    for i, sample in enumerate(queue):
+        encoder_input = sample['encoder_input']
+        encoder_input = encoder_input.cuda()
+        encoder_input_list.append(encoder_input)
+    # Apply MRAS to infer new archs
+    new_archs = model.generate_new_arch_with_mras(encoder_input_list, step, direction=direction)
+    for new_arch in new_archs:
+        new_arch_list.extend(new_arch.data.squeeze().tolist())
+    return new_arch_list
+
 
 def main():
     if not torch.cuda.is_available():
@@ -775,19 +789,21 @@ def main():
         nao_infer_dataset = utils.NAODataset(top100_archs, None, False)
         nao_infer_queue = torch.utils.data.DataLoader(
             nao_infer_dataset, batch_size=len(nao_infer_dataset), shuffle=False, pin_memory=True)
-        while len(new_archs) < args.controller_new_arch:
-            predict_step_size += 1
-            logging.info('Generate new architectures with step size %d', predict_step_size)
-            new_arch = nao_infer(nao_infer_queue, nao, predict_step_size, direction='+')
-            for arch in new_arch:
-                if arch not in encoder_input and arch not in new_archs:
-                    new_archs.append(arch)
-                if len(new_archs) >= args.controller_new_arch:
-                    break
-            logging.info('%d new archs generated now', len(new_archs))
-            if predict_step_size > max_step_size:
-                break
-                # [[conv, reduc]]
+        # while len(new_archs) < args.controller_new_arch:
+        #     predict_step_size += 1
+        #     logging.info('Generate new architectures with step size %d', predict_step_size)
+        #     new_arch = nao_infer(nao_infer_queue, nao, predict_step_size, direction='+')
+        #     for arch in new_arch:
+        #         if arch not in encoder_input and arch not in new_archs:
+        #             new_archs.append(arch)
+        #         if len(new_archs) >= args.controller_new_arch:
+        #             break
+        #     logging.info('%d new archs generated now', len(new_archs))
+        #     if predict_step_size > max_step_size:
+        #         break
+        #         # [[conv, reduc]]
+        # Instead of passing each architecture, I want to send the queue at once, and generate new archs as a whole batch
+        new_archs = nao_infer_btp(nao_infer_queue, nao, 1, direction='+')
         new_archs = list(map(lambda x: utils.parse_seq_to_arch(x, 2), new_archs))  # [[[conv],[reduc]]]
         num_new_archs = len(new_archs)
         logging.info("Generate %d new archs", num_new_archs)
