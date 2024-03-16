@@ -106,7 +106,9 @@ def mras(arch,predict_lambda, forward):
     global alpha
     global quantile
     global d
-    
+
+    print("Number of architectures: ", len(arch))
+    print("Length of each architecture: ", len(arch[0]))
     randomIids = arch
     alpha = predict_lambda
     N = len(arch)
@@ -114,6 +116,8 @@ def mras(arch,predict_lambda, forward):
     print("Arch: ", arch)
     d = len(arch[0])
     prop_df = pdf()
+    print("Dimension of Mean: ", len(pdf.mu))
+    print("Dimension - d: ", d)
     for k in range(1, K + 1):
         if randomIids == None:
             N = 100

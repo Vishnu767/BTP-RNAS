@@ -713,7 +713,13 @@ def main():
         old_archs = child_arch_pool
         old_archs_perf = valid_accuracy_list
 
-        old_archs_sorted_indices = np.argsort(old_archs_perf)[::-1]
+        old_archs_perf = torch.tensor(old_archs_perf)
+
+        # Sort indices in descending order based on old_archs_perf
+        old_archs_sorted_indices = torch.argsort(old_archs_perf, descending=True)
+
+        # old_archs_sorted_indices = np.argsort(old_archs_perf)[::-1]
+        
         old_archs = [old_archs[i] for i in old_archs_sorted_indices]
         old_archs_perf = [old_archs_perf[i] for i in old_archs_sorted_indices]
         with open(os.path.join(args.output_dir, 'arch_pool.{}'.format(epoch)), 'w') as fa:
