@@ -623,11 +623,10 @@ def nao_infer_btp(queue, model, step, direction='+'):
     for i, sample in enumerate(queue):
         encoder_input = sample['encoder_input']
         encoder_input = encoder_input.cuda()
-        encoder_input_list.append(encoder_input)
-    # Apply MRAS to infer new archs
-    new_archs = model.generate_new_arch_with_mras(encoder_input_list, step, direction=direction)
-    for new_arch in new_archs:
-        new_arch_list.extend(new_arch.data.squeeze().tolist())
+        model.zero_grad()
+        print("Encoder input ", i, ": ", encoder_input)
+        new_archs = model.generate_new_arch_with_mras(encoder_input_list[0], step, direction=direction)
+        new_arch_list.extend(new_archs)
     return new_arch_list
 
 
@@ -795,6 +794,7 @@ def main():
         nao_infer_dataset = utils.NAODataset(top100_archs, None, False)
         nao_infer_queue = torch.utils.data.DataLoader(
             nao_infer_dataset, batch_size=len(nao_infer_dataset), shuffle=False, pin_memory=True)
+        # print("NAO infer Queue: ")
         # while len(new_archs) < args.controller_new_arch:
         #     predict_step_size += 1
         #     logging.info('Generate new architectures with step size %d', predict_step_size)

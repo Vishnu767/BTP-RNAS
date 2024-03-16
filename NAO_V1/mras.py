@@ -7,7 +7,7 @@ from torch.distributions.multivariate_normal import MultivariateNormal
 d = 2
 def H(arr,forward):
     encoder_outputs, encoder_hidden, arch_emb, predict_value = forward(arr)
-    return S(predict_value)
+    return S(predict_value[0][0])
 
 def S(x):
     r = 1
@@ -106,14 +106,13 @@ def mras(arch,predict_lambda, forward):
     global alpha
     global quantile
     global d
-
     print("Number of architectures: ", len(arch))
     print("Length of each architecture: ", len(arch[0]))
     randomIids = arch
     alpha = predict_lambda
     N = len(arch)
     # Set the dimension too
-    print("Arch: ", arch)
+    print("Architectures: ", arch)
     d = len(arch[0])
     prop_df = pdf()
     print("Dimension of Mean: ", len(pdf.mu))
