@@ -619,13 +619,12 @@ def nao_infer(queue, model, step, direction='+'):
 def nao_infer_btp(queue, model, step, direction='+'):
     new_arch_list = []
     model.eval()
-    encoder_input_list = []
     for i, sample in enumerate(queue):
         encoder_input = sample['encoder_input']
         encoder_input = encoder_input.cuda()
         model.zero_grad()
         print("Encoder input ", i, ": ", encoder_input)
-        new_archs = model.generate_new_arch_with_mras(encoder_input_list[0], step, direction=direction)
+        new_archs = model.generate_new_arch_with_mras(encoder_input, step, direction=direction)
         new_arch_list.extend(new_archs)
     return new_arch_list
 

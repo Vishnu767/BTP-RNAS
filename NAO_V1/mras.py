@@ -115,7 +115,7 @@ def mras(arch,predict_lambda, forward):
     print("Architectures: ", arch)
     d = len(arch[0])
     prop_df = pdf()
-    print("Dimension of Mean: ", len(pdf.mu))
+    print("Dimension of Mean: ", len(prop_df.mu))
     print("Dimension - d: ", d)
     for k in range(1, K + 1):
         if randomIids == None:
