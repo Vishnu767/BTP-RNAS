@@ -86,7 +86,7 @@ class Encoder(nn.Module):
         return encoder_outputs, encoder_hidden, arch_emb, predict_value, new_encoder_outputs, new_arch_emb
     
     def infer_mras(self, input_variables, predict_lambda, direction='-'):
-        new_encoder_outputs_list = mras(input_variables, predict_lambda, self.forward)
+        new_encoder_outputs_list = mras(input_variables, predict_lambda, self.forward, self.vocab_size)
         new_encoder_outputs_list_updated = []
         new_arch_emb_list = []
 

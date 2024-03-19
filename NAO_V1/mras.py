@@ -3,13 +3,14 @@ import numpy as np
 import torch.nn.functional as F
 from functools import cmp_to_key
 from torch.distributions.multivariate_normal import MultivariateNormal
+import torchrl.modules as trm
 
 d = 2
+left_boundary = 0
+right_boundary = 0
 def H(arr,forward):
     arr = torch.tensor([arr.tolist()]).cuda()
     encoder_outputs, encoder_hidden, arch_emb, predict_value = forward(arr)
-    print("Architecture inside passing to H(x): ", arr)
-    print("Predict Value: ", predict_value)
     return S(predict_value[0][0])
 
 def S(x):
@@ -29,7 +30,7 @@ class pdf:
     def __init__(self):
         self.mu = torch.zeros(d).cuda()
         self.sigma = 10*torch.eye(d).cuda()
-        self.PDF = MultivariateNormal(self.mu, self.sigma)
+        # self.PDF = MultivariateNormal(self.mu, self.sigma)
 
     def f(self, x):
         return self.PDF.log_prob(x)
@@ -42,7 +43,7 @@ class pdf:
             if i!=j:
               self.sigma[i][j] = 0
             # self.sigma[i][j] = abs(self.sigma[i][j]) #New added line ...might not require
-        self.PDF = MultivariateNormal(self.mu, self.sigma)
+        # self.PDF = MultivariateNormal(self.mu, self.sigma)
 
 def I(x, gamma):
     return torch.where(x>=gamma, x, 0)
@@ -85,8 +86,16 @@ def return_random_iids2(low, high, N):
 def return_random_iids(N, prop_df):
     arr = []
     for i in range(N):
-      arr.append(prop_df.PDF.sample().tolist())
-    return torch.tensor(arr).cuda()
+        sample = []
+        for j in range(d):
+            truncatedNormal = trm.TruncatedNormal(loc=prop_df.mu[j], scale=prop_df.sigma[j][j], min=left_boundary, max=right_boundary)
+            sampled_value = truncatedNormal.sample()
+            sample.append(sampled_value)
+        sample = torch.round(torch.tensor(sample)).int().cuda()
+        arr.append(sample)
+    return arr
+    #   arr.append(prop_df.PDF.sample().tolist())
+    # return torch.round(torch.tensor(arr)).int().cuda()
     # return torch.tensor(np.random.multivariate_normal(pdf_function.mu.numpy(), pdf_function.sigma.numpy(), N))
 
 low = torch.tensor([-2, -2]).cuda()
@@ -103,28 +112,34 @@ def compare(X, Y):
         return -1
     return 1
 
-def mras(arch,predict_lambda, forward):
+def mras(arch,predict_lambda, forward, vocab_size):
     global N
     global gamma
     global epsilon
     global alpha
     global quantile
     global d
-    print("Number of architectures: ", len(arch))
-    print("Length of each architecture: ", len(arch[0]))
+    global right_boundary
+
+    right_boundary = vocab_size-1
+    # print("Number of architectures: ", len(arch))
+    # print("Length of each architecture: ", len(arch[0]))
     randomIids = arch.cuda()
     alpha = predict_lambda
     N = len(arch)
     # Set the dimension too
-    print("Architectures: ", arch)
+    # print("Architectures: ", arch)
     d = len(arch[0])
     prop_df = pdf()
-    print("Dimension of Mean: ", len(prop_df.mu))
-    print("Dimension - d: ", d)
+    # print("Dimension of Mean: ", len(prop_df.mu))
+    # print("Dimension - d: ", d)
     for k in range(1, K + 1):
         if randomIids == None:
             N = 100
             randomIids = return_random_iids(N, prop_df)
+        print("Random IIDs: ")
+        for i,x in enumerate(randomIids):
+           print("IID ", i, ": ", x)
         randomIids = randomIids.cuda()
         HValues = [H(i,forward) for i in randomIids]
         HValues_X = [[H(i,forward), i] for i in randomIids]
@@ -132,7 +147,7 @@ def mras(arch,predict_lambda, forward):
         sortedXValues = sorted(HValues_X, key=cmp_to_key(compare))
         XArray = [temp_arr[1] for temp_arr in sortedXValues]
         quantileIndex = int((1 - quantile) * N)
-        currGamma = sortedHValues[quantileIndex] #bug
+        currGamma = sortedHValues[quantileIndex]
         if k == 1 or currGamma >= gamma + (epsilon / 2):
             gamma = currGamma
             ind = HValues.index(gamma)
@@ -140,8 +155,9 @@ def mras(arch,predict_lambda, forward):
             gamma = currGamma
             N = int(alpha * N)
         prop_df.update(update_mu(XArray, gamma, k, prop_df, forward), update_sigma(XArray, gamma, k, prop_df, forward))
-        print(prop_df.mu, prop_df.sigma)
-        print(H(prop_df.mu, forward))
+        print("Mean: ", prop_df.mu)
+        print("Sigma: ", prop_df.sigma)
+        # print(H(prop_df.mu, forward))
         randomIids = None
     
     return (return_random_iids(len(arch), prop_df)).cuda()
