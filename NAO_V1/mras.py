@@ -2,8 +2,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from functools import cmp_to_key
-from torch.distributions.multivariate_normal import MultivariateNormal
-import torchrl.modules as trm
+from scipy.stats import truncnorm
 
 d = 2
 left_boundary = 0
@@ -84,14 +83,14 @@ def return_random_iids2(low, high, N):
     return randomIids.cuda()
 
 def return_random_iids(N, prop_df):
-    arr = []
+    arr = torch.tensor([])
     for i in range(N):
         sample = []
         for j in range(d):
-            truncatedNormal = trm.TruncatedNormal(loc=prop_df.mu[j], scale=prop_df.sigma[j][j], min=left_boundary, max=right_boundary)
-            sampled_value = truncatedNormal.sample()
+            a, b = (left_boundary - prop_df.mu[j]) / prop_df.sigma[j][j], (right_boundary - prop_df.mu[j]) / prop_df.sigma[j][j]
+            sampled_value = truncnorm.rvs(a, b, loc=prop_df.mu[j], scale=prop_df.sigma[j][j])
             sample.append(sampled_value)
-        sample = torch.round(torch.tensor(sample)).int().cuda()
+        sample = (torch.round(torch.tensor(sample))).int().cuda()
         arr.append(sample)
     return arr
     #   arr.append(prop_df.PDF.sample().tolist())
@@ -122,17 +121,11 @@ def mras(arch,predict_lambda, forward, vocab_size):
     global right_boundary
 
     right_boundary = vocab_size-1
-    # print("Number of architectures: ", len(arch))
-    # print("Length of each architecture: ", len(arch[0]))
     randomIids = arch.cuda()
     alpha = predict_lambda
     N = len(arch)
-    # Set the dimension too
-    # print("Architectures: ", arch)
     d = len(arch[0])
     prop_df = pdf()
-    # print("Dimension of Mean: ", len(prop_df.mu))
-    # print("Dimension - d: ", d)
     for k in range(1, K + 1):
         if randomIids == None:
             N = 100
@@ -140,7 +133,7 @@ def mras(arch,predict_lambda, forward, vocab_size):
         print("Random IIDs: ")
         for i,x in enumerate(randomIids):
            print("IID ", i, ": ", x)
-        randomIids = randomIids.cuda()
+        # randomIids = randomIids.cuda()
         HValues = [H(i,forward) for i in randomIids]
         HValues_X = [[H(i,forward), i] for i in randomIids]
         sortedHValues = sorted(HValues)
