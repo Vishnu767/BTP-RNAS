@@ -88,7 +88,7 @@ def return_random_iids(N, prop_df):
         sample = []
         for j in range(d):
             a, b = (left_boundary - prop_df.mu[j]) / prop_df.sigma[j][j], (right_boundary - prop_df.mu[j]) / prop_df.sigma[j][j]
-            sampled_value = truncnorm.rvs(a, b, loc=prop_df.mu[j], scale=prop_df.sigma[j][j])
+            sampled_value = truncnorm.rvs(a.item(), b.item(), (prop_df.mu[j]).item(), (prop_df.sigma[j][j]).item())
             sample.append(sampled_value)
         sample = (torch.round(torch.tensor(sample))).int().cuda()
         arr.append(sample)
