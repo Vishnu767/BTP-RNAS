@@ -70,6 +70,15 @@ class Encoder(nn.Module):
         out = self.regressor(out)
         predict_value = torch.sigmoid(out)
         return encoder_outputs, encoder_hidden, arch_emb, predict_value
+
+    def get_performance(self,x):
+        out = F.normalize(x, 2, dim=-1)
+        out = torch.mean(out,dim=1)
+        out = F.normalize(out,2,dim=-1)
+        out = self.mlp(out)
+        out = self.regressor(out)
+        predict_value = torch.sigmoid(out)
+        return predict_value
     
     def infer(self, x, predict_lambda, direction='-'):
         encoder_outputs, encoder_hidden, arch_emb, predict_value = self(x)
@@ -86,13 +95,9 @@ class Encoder(nn.Module):
         return encoder_outputs, encoder_hidden, arch_emb, predict_value, new_encoder_outputs, new_arch_emb
     
     def infer_mras(self, input_variables, predict_lambda, direction='-'):
-        new_encoder_outputs = mras(input_variables, predict_lambda, self.forward, self.vocab_size)
-
-        # for x in new_encoder_outputs_list:
+        encoder_outputs, encoder_hidden, arch_emb, predict_value = self(input_variables)
+        new_encoder_outputs = mras(encoder_outputs, predict_lambda, self.get_performance)
         new_encoder_outputs = F.normalize(new_encoder_outputs,2,dim=-1)
-        # new_encoder_outputs_list_updated.append(new_encoder_output)
         new_arch_emb = torch.mean(new_encoder_outputs, dim=1)
         new_arch_emb = F.normalize(new_arch_emb,2,dim=-1)
-        # new_arch_emb_list.append(new_arch_emb)
-
         return new_encoder_outputs, new_arch_emb

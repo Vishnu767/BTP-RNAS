@@ -2,34 +2,24 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from functools import cmp_to_key
-from scipy.stats import truncnorm
+from torch.distributions.multivariate_normal import MultivariateNormal
 
 d = 2
-left_boundary = 0
-right_boundary = 0
-def H(arr,forward):
-    arr = torch.tensor([arr.tolist()]).cuda()
-    encoder_outputs, encoder_hidden, arch_emb, predict_value = forward(arr)
-    return S(predict_value[0][0])
+T = 2
+def H(arr,get_performance):
+    e_x = arr.reshape(T,d)
+    predict_value = get_performance(e_x.unsqueeze(0))
+    return predict_value
 
 def S(x):
     r = 1
     return torch.exp(r*x).cuda()
 
-def H2(arr):
-    d = len(arr)
-    val = 0
-    prod = 1
-    for i in range(d):
-        val += (arr[i]**2) / 4000
-        prod *= np.cos(arr[i] / np.sqrt(i + 1))
-    return -1 * (val - prod + 1)
-
 class pdf:
     def __init__(self):
-        self.mu = torch.zeros(d).cuda()
-        self.sigma = 10*torch.eye(d).cuda()
-        # self.PDF = MultivariateNormal(self.mu, self.sigma)
+        self.mu = torch.zeros(T*d).cuda()
+        self.sigma = 10*torch.eye(T*d).cuda()
+        self.PDF = MultivariateNormal(self.mu, self.sigma)
 
     def f(self, x):
         return self.PDF.log_prob(x)
@@ -42,7 +32,7 @@ class pdf:
             if i!=j:
               self.sigma[i][j] = 0
             # self.sigma[i][j] = abs(self.sigma[i][j]) #New added line ...might not require
-        # self.PDF = MultivariateNormal(self.mu, self.sigma)
+        self.PDF = MultivariateNormal(self.mu, self.sigma)
 
 def I(x, gamma):
     return torch.where(x>=gamma, x, 0)
@@ -57,45 +47,30 @@ def calculate_expection(X, func, k, pdf_function, gamma):
         count += 1
     return sum / count
 
-def update_mu(X, gamma, k, pdf_function, forward):
+def update_mu(X, gamma, k, pdf_function, get_performance):
     k = 1
     def func_numerator(x,k,pdf_function, gamma):
-      return (S(H(x,forward))**k) * I(H(x,forward),gamma) * x
+      return (S(H(x,get_performance))**k) * I(H(x,get_performance),gamma) * x
     def func_denominator(x,k,pdf_function, gamma):
-      return ((S(H(x,forward))**k) * I(H(x,forward),gamma))
+      return ((S(H(x,get_performance))**k) * I(H(x,get_performance),gamma))
     return torch.tensor(calculate_expection(X, func_numerator, k, pdf_function, gamma) / calculate_expection(X, func_denominator, k, pdf_function, gamma)).cuda()
 
-def update_sigma(X, gamma, k, pdf_function, forward):
+def update_sigma(X, gamma, k, pdf_function, get_performance):
     k = 1
     def func_numerator(x,k,pdf_function,gamma):
       matrix1 = torch.unsqueeze(x-pdf_function.mu,dim=0).cuda()
       matrix2 = torch.reshape(matrix1,(d,1)).cuda()
-      return (S(H(x,forward))**k) * I(H(x,forward),gamma) *(torch.matmul(matrix2,matrix1))
+      return (S(H(x,get_performance))**k) * I(H(x,get_performance),gamma) *(torch.matmul(matrix2,matrix1))
     def func_denominator(x,k,pdf_function,gamma):
-      return ((S(H(x,forward))**k) * I(H(x,forward),gamma))
+      return ((S(H(x,get_performance))**k) * I(H(x,get_performance),gamma))
     arr = calculate_expection(X, func_numerator, k, pdf_function, gamma) / calculate_expection(X, func_denominator, k, pdf_function, gamma)
     return torch.tensor(arr).cuda()
 
-def return_random_iids2(low, high, N):
-    randomIidsX = torch.tensor(np.random.uniform(low[0], high[0], N)).cuda()
-    randomIidsY = torch.tensor(np.random.uniform(low[1], high[1], N)).cuda()
-    randomIids = [torch.tensor([randomIidsX[i].item(), randomIidsY[i].item()]) for i in range(N)]
-    return randomIids.cuda()
-
-def return_random_iids(N, prop_df):
-    arr = torch.tensor([])
+def return_random_iids(N, prop_df, get_float=0):
+    arr = []
     for i in range(N):
-        sample = []
-        for j in range(d):
-            a, b = (left_boundary - prop_df.mu[j]) / prop_df.sigma[j][j], (right_boundary - prop_df.mu[j]) / prop_df.sigma[j][j]
-            sampled_value = truncnorm.rvs(a.item(), b.item(), (prop_df.mu[j]).item(), (prop_df.sigma[j][j]).item())
-            sample.append(sampled_value)
-        sample = (torch.round(torch.tensor(sample))).int().cuda()
-        arr.append(sample)
-    return arr
-    #   arr.append(prop_df.PDF.sample().tolist())
-    # return torch.round(torch.tensor(arr)).int().cuda()
-    # return torch.tensor(np.random.multivariate_normal(pdf_function.mu.numpy(), pdf_function.sigma.numpy(), N))
+      arr.append(prop_df.PDF.sample().tolist())
+    return torch.tensor(arr).cuda()
 
 low = torch.tensor([-2, -2]).cuda()
 high = torch.tensor([5, 5]).cuda()
@@ -111,17 +86,23 @@ def compare(X, Y):
         return -1
     return 1
 
-def mras(arch,predict_lambda, forward, vocab_size):
+def mras(arch,predict_lambda, get_performance):
     global N
     global gamma
     global epsilon
     global alpha
     global quantile
     global d
-    global right_boundary
+    global T
 
-    right_boundary = vocab_size-1
-    randomIids = arch.cuda()
+    T = len(arch[0])
+    d = len(arch[0][0])
+
+    randomIids = torch.tensor([]).cuda()
+    for architecture in arch:
+       flattened_arch = torch.flatten(architecture)
+       randomIids = torch.cat((randomIids,flattened_arch.unsqueeze(0)), dim=0)
+
     alpha = predict_lambda
     N = len(arch)
     d = len(arch[0])
@@ -134,8 +115,8 @@ def mras(arch,predict_lambda, forward, vocab_size):
         for i,x in enumerate(randomIids):
            print("IID ", i, ": ", x)
         # randomIids = randomIids.cuda()
-        HValues = [H(i,forward) for i in randomIids]
-        HValues_X = [[H(i,forward), i] for i in randomIids]
+        HValues = [H(i,get_performance) for i in randomIids]
+        HValues_X = [[iid,i] for i,iid in enumerate(HValues)]
         sortedHValues = sorted(HValues)
         sortedXValues = sorted(HValues_X, key=cmp_to_key(compare))
         XArray = [temp_arr[1] for temp_arr in sortedXValues]
@@ -147,10 +128,16 @@ def mras(arch,predict_lambda, forward, vocab_size):
         else:
             gamma = currGamma
             N = int(alpha * N)
-        prop_df.update(update_mu(XArray, gamma, k, prop_df, forward), update_sigma(XArray, gamma, k, prop_df, forward))
+        prop_df.update(update_mu(XArray, gamma, k, prop_df, get_performance), update_sigma(XArray, gamma, k, prop_df, get_performance))
         print("Mean: ", prop_df.mu)
         print("Sigma: ", prop_df.sigma)
-        # print(H(prop_df.mu, forward))
+        print(H(prop_df.mu, get_performance))
         randomIids = None
     
-    return (return_random_iids(len(arch), prop_df)).cuda()
+    new_flattened_encoder_outputs = return_random_iids(len(arch), prop_df)
+    new_encoder_outputs = torch.tensor([]).cuda()
+    for architecture in new_flattened_encoder_outputs:
+       proper_architecture = architecture.reshape(T,d)
+       new_encoder_outputs = torch.cat((new_encoder_outputs, proper_architecture.unsqueeze(0)), dim=0)
+    print("Final Encoder Outputs: ", new_encoder_outputs)
+    return new_encoder_outputs
