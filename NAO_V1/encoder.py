@@ -78,7 +78,7 @@ class Encoder(nn.Module):
         out = self.mlp(out)
         out = self.regressor(out)
         predict_value = torch.sigmoid(out)
-        return predict_value
+        return predict_value[0][0]
     
     def infer(self, x, predict_lambda, direction='-'):
         encoder_outputs, encoder_hidden, arch_emb, predict_value = self(x)

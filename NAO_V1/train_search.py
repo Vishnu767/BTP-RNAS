@@ -31,10 +31,10 @@ parser.add_argument('--output_dir', type=str, default='models')
 parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--child_batch_size', type=int, default=64)
 parser.add_argument('--child_eval_batch_size', type=int, default=500)
-parser.add_argument('--child_epochs', type=int, default=150)
+parser.add_argument('--child_epochs', type=int, default=150) # Changed 150 to 3
 parser.add_argument('--child_layers', type=int, default=3)
 parser.add_argument('--child_nodes', type=int, default=5)
-parser.add_argument('--child_channels', type=int, default=20)
+parser.add_argument('--child_channels', type=int, default=20) #Modified 20 to 10
 parser.add_argument('--child_cutout_size', type=int, default=None)
 parser.add_argument('--child_grad_bound', type=float, default=5.0)
 parser.add_argument('--child_lr_max', type=float, default=0.025)
@@ -60,7 +60,7 @@ parser.add_argument('--controller_mlp_hidden_size', type=int, default=200)
 parser.add_argument('--controller_decoder_layers', type=int, default=1)
 parser.add_argument('--controller_decoder_hidden_size', type=int, default=96)
 parser.add_argument('--controller_source_length', type=int, default=40)
-parser.add_argument('--controller_encoder_length', type=int, default=20)
+parser.add_argument('--controller_encoder_length', type=int, default=20) # Changed 20 to 2
 parser.add_argument('--controller_decoder_length', type=int, default=40)
 parser.add_argument('--controller_encoder_dropout', type=float, default=0)
 parser.add_argument('--controller_mlp_dropout', type=float, default=0.1)
@@ -623,9 +623,8 @@ def nao_infer_btp(queue, model, step, direction='+'):
         encoder_input = sample['encoder_input']
         encoder_input = encoder_input.cuda()
         model.zero_grad()
-        print("Encoder input ", i, ": ", encoder_input)
         new_archs = model.generate_new_arch_with_mras(encoder_input, step, direction=direction)
-        new_arch_list.extend(new_archs)
+        new_arch_list.extend(new_archs.data.squeeze().tolist())
     return new_arch_list
 
 
@@ -808,7 +807,14 @@ def main():
         #         break
         #         # [[conv, reduc]]
         # Instead of passing each architecture, I want to send the queue at once, and generate new archs as a whole batch
-        new_archs = nao_infer_btp(nao_infer_queue, nao, 1, direction='+')
+        new_arch_btp = nao_infer_btp(nao_infer_queue, nao, 1, direction='+')
+        # print("Encoder Input: ", encoder_input)
+        # print("New archs: ", new_archs)
+        for arch in new_arch_btp:
+            if arch not in encoder_input and arch not in new_archs:
+                new_archs.append(arch)
+            if len(new_archs) >= args.controller_new_arch:
+                break
         new_archs = list(map(lambda x: utils.parse_seq_to_arch(x, 2), new_archs))  # [[[conv],[reduc]]]
         num_new_archs = len(new_archs)
         logging.info("Generate %d new archs", num_new_archs)
@@ -835,7 +841,7 @@ def main():
         top_archs_perf = train_and_evaluate_top_on_cifar100(top_archs, train_queue, valid_queue)
     else:
         top_archs_perf = train_and_evaluate_top_on_imagenet(top_archs, train_queue, valid_queue)
-    top_archs_sorted_indices = np.argsort(top_archs_perf)[::-1]
+    top_archs_sorted_indices = np.argsort(top_archs_perf.cpu().numpy())[::-1]
     top_archs = [top_archs[i] for i in top_archs_sorted_indices]
     top_archs_perf = [top_archs_perf[i] for i in top_archs_sorted_indices]
     with open(os.path.join(args.output_dir, 'arch_pool.final'), 'w') as fa:
