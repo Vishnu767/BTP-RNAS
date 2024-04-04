@@ -841,7 +841,7 @@ def main():
         top_archs_perf = train_and_evaluate_top_on_cifar100(top_archs, train_queue, valid_queue)
     else:
         top_archs_perf = train_and_evaluate_top_on_imagenet(top_archs, train_queue, valid_queue)
-    top_archs_sorted_indices = np.argsort(top_archs_perf.cpu().numpy())[::-1]
+    top_archs_sorted_indices = np.argsort([t.cpu().numpy() for t in top_archs_perf])[::-1]
     top_archs = [top_archs[i] for i in top_archs_sorted_indices]
     top_archs_perf = [top_archs_perf[i] for i in top_archs_sorted_indices]
     with open(os.path.join(args.output_dir, 'arch_pool.final'), 'w') as fa:
