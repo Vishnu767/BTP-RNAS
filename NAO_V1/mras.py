@@ -76,7 +76,7 @@ low = torch.tensor([-2, -2]).cuda()
 high = torch.tensor([5, 5]).cuda()
 N = 200
 quantile = 0.05
-K = 5
+K = 50
 gamma = torch.tensor(-1000).cuda()
 epsilon = torch.tensor(0.001).cuda()
 alpha = 1
@@ -97,18 +97,19 @@ def mras(arch,predict_lambda, get_performance):
 
     T = len(arch[0])
     d = len(arch[0][0])
+    N = len(arch)
 
-    # randomIids = torch.tensor([]).cuda()
-    # for architecture in arch:
-    #    flattened_arch = torch.flatten(architecture)
-    #    randomIids = torch.cat((randomIids,flattened_arch.unsqueeze(0)), dim=0)
+    randomIids = torch.tensor([]).cuda()
+    for architecture in arch:
+       flattened_arch = torch.flatten(architecture)
+       randomIids = torch.cat((randomIids,flattened_arch.unsqueeze(0)), dim=0)
 
     # alpha = predict_lambda
     prop_df = pdf()
     for k in range(1, K + 1):
-        # if randomIids == None:
-        #     N = 100
-        randomIids = return_random_iids(N, prop_df)
+        if randomIids == None:
+            N = 100
+            randomIids = return_random_iids(N, prop_df)
         # print("Random IIDs: ")
         # for i,x in enumerate(randomIids):
         #    print("IID ", i, ": ", x)
@@ -129,7 +130,9 @@ def mras(arch,predict_lambda, get_performance):
             N = int(alpha * N)
         prop_df.update(update_mu(XArray, gamma, k, prop_df, get_performance), update_sigma(XArray, gamma, k, prop_df, get_performance))
         randomIids = None
-    
+        
+    print("Mean (mras.py): ", prop_df.mu)
+    print("Sigma (mras.py): ", prop_df.sigma)
     print("Performance of Mean (mras.py): ", H(prop_df.mu, get_performance))
     new_flattened_encoder_outputs = return_random_iids(len(arch), prop_df)
     new_encoder_outputs = torch.tensor([]).cuda()
