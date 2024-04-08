@@ -31,8 +31,19 @@ class pdf:
           for j in range(T*d):
             if i!=j:
               self.sigma[i][j] = 0
-            # self.sigma[i][j] = abs(self.sigma[i][j]) #New added line ...might not require
         self.PDF = MultivariateNormal(self.mu, self.sigma)
+    
+    def change_sigma(self):
+        newSigma = self.sigma
+        for i in range(T*d):
+           newSigma[i][i] = max(self.sigma[i][i],abs(self.mu[i]*0.25)) # Added abs, yet to run this
+        self.sigma = newSigma
+        for i in range(T*d):
+            for j in range(T*d):
+                if i!=j:
+                    self.sigma[i][j] = 0
+        self.PDF = MultivariateNormal(self.mu, self.sigma)
+       
 
 def I(x, gamma):
     return torch.where(x>=gamma, x, 0)
@@ -104,16 +115,11 @@ def mras(arch,predict_lambda, get_performance):
        flattened_arch = torch.flatten(architecture)
        randomIids = torch.cat((randomIids,flattened_arch.unsqueeze(0)), dim=0)
 
-    # alpha = predict_lambda
     prop_df = pdf()
     for k in range(1, K + 1):
         if randomIids == None:
-            N = 100
+            N = 200
             randomIids = return_random_iids(N, prop_df)
-        # print("Random IIDs: ")
-        # for i,x in enumerate(randomIids):
-        #    print("IID ", i, ": ", x)
-        # randomIids = randomIids.cuda()
         HValues = [H(i,get_performance) for i in randomIids]
         HValues_X = [[iid,randomIids[i]] for i,iid in enumerate(HValues)]
         sortedHValues = sorted(HValues)
@@ -132,9 +138,13 @@ def mras(arch,predict_lambda, get_performance):
         randomIids = None
         
     print("Mean (mras.py): ", prop_df.mu)
-    print("Sigma (mras.py): ", prop_df.sigma)
+    print("Sigma (Before)(mras.py): ", prop_df.sigma)
+    prop_df.change_sigma()
+    print("Sigma (After)(mras.py): ", prop_df.sigma)
     print("Performance of Mean (mras.py): ", H(prop_df.mu, get_performance))
-    new_flattened_encoder_outputs = return_random_iids(len(arch), prop_df)
+    new_flattened_encoder_outputs = return_random_iids(299, prop_df)
+    new_flattened_encoder_outputs = torch.cat((new_flattened_encoder_outputs, prop_df.mu.unsqueeze(0)), dim=0)
+    
     new_encoder_outputs = torch.tensor([]).cuda()
     for architecture in new_flattened_encoder_outputs:
        proper_architecture = architecture.reshape(T,d)
