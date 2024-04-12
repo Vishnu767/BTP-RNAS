@@ -21,6 +21,11 @@ class pdf:
         self.sigma = 10*torch.eye(T*d).cuda()
         self.PDF = MultivariateNormal(self.mu, self.sigma)
 
+    def init_sigma(self):
+        for i in range(T*d):
+            self.sigma[i][i] += 1
+        self.PDF = MultivariateNormal(self.mu, self.sigma)
+
     def f(self, x):
         return self.PDF.log_prob(x)
 
@@ -35,10 +40,8 @@ class pdf:
         self.PDF = MultivariateNormal(self.mu, self.sigma)
     
     def change_sigma(self):
-        newSigma = self.sigma
         for i in range(T*d):
-           newSigma[i][i] = max(self.sigma[i][i],abs(self.mu[i]*0.25))
-        self.sigma = newSigma
+           self.sigma[i][i] = 0.25
         self.PDF = MultivariateNormal(self.mu, self.sigma)
        
 
@@ -83,8 +86,8 @@ def return_random_iids(N, prop_df, get_float=0):
 low = torch.tensor([-2, -2]).cuda()
 high = torch.tensor([5, 5]).cuda()
 N = 200
-quantile = 0.05
-K = 50
+quantile = 0.1
+K = 80
 gamma = torch.tensor(-1000).cuda()
 epsilon = torch.tensor(0.001).cuda()
 alpha = 1
@@ -137,6 +140,8 @@ def mras(arch,predict_lambda, get_performance):
             gamma = currGamma
             N = int(alpha * N)
         prop_df.update(update_mu(XArray, gamma, k, prop_df, get_performance), update_sigma(XArray, gamma, k, prop_df, get_performance))
+        if k==1:
+           prop_df.init_sigma()
         randomIids = None
         
     print("Mean (mras.py): ", prop_df.mu)
