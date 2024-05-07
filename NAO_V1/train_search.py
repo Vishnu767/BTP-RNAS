@@ -1,856 +1,615 @@
 import os
-import sys
-import glob
-import time
 import copy
-import random
 import numpy as np
-import torch
-import utils
 import logging
-import argparse
+import shutil
+import threading
+import gc
+import zipfile
+from io import BytesIO
+from PIL import Image
+import torch
 import torch.nn as nn
-import torch.utils
-import torch.nn.functional as F
-import torchvision.datasets as dset
+import torch.utils.data as data
 import torchvision.transforms as transforms
-import torch.backends.cudnn as cudnn
-from model import NASNetworkCIFAR, NASNetworkImageNet
-from model_search import NASWSNetworkCIFAR, NASWSNetworkImageNet
-from controller import NAO
 
-parser = argparse.ArgumentParser(description='NAO CIFAR-10')
-
-# Basic model parameters.
-parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
-parser.add_argument('--data', type=str, default='./data')
-parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10, cifar100, imagenet'])
-parser.add_argument('--zip_file', action='store_true', default=False)
-parser.add_argument('--lazy_load', action='store_true', default=False)
-parser.add_argument('--output_dir', type=str, default='models')
-parser.add_argument('--seed', type=int, default=0)
-parser.add_argument('--child_batch_size', type=int, default=64)
-parser.add_argument('--child_eval_batch_size', type=int, default=500)
-parser.add_argument('--child_epochs', type=int, default=150) # Changed 150 to 3
-parser.add_argument('--child_layers', type=int, default=3)
-parser.add_argument('--child_nodes', type=int, default=5)
-parser.add_argument('--child_channels', type=int, default=20) #Modified 20 to 10
-parser.add_argument('--child_cutout_size', type=int, default=None)
-parser.add_argument('--child_grad_bound', type=float, default=5.0)
-parser.add_argument('--child_lr_max', type=float, default=0.025)
-parser.add_argument('--child_lr_min', type=float, default=0.001)
-parser.add_argument('--child_keep_prob', type=float, default=1.0)
-parser.add_argument('--child_drop_path_keep_prob', type=float, default=0.9)
-parser.add_argument('--child_l2_reg', type=float, default=3e-4)
-parser.add_argument('--child_use_aux_head', action='store_true', default=False)
-parser.add_argument('--child_eval_epochs', type=str, default='30')
-parser.add_argument('--child_arch_pool', type=str, default=None)
-parser.add_argument('--child_lr', type=float, default=0.1)
-parser.add_argument('--child_label_smooth', type=float, default=0.1, help='label smoothing')
-parser.add_argument('--child_gamma', type=float, default=0.97, help='learning rate decay')
-parser.add_argument('--child_decay_period', type=int, default=1, help='epochs between two learning rate decays')
-parser.add_argument('--controller_seed_arch', type=int, default=600)
-parser.add_argument('--controller_expand', type=int, default=None)
-parser.add_argument('--controller_new_arch', type=int, default=300)
-parser.add_argument('--controller_encoder_layers', type=int, default=1)
-parser.add_argument('--controller_encoder_hidden_size', type=int, default=96)
-parser.add_argument('--controller_encoder_emb_size', type=int, default=48)
-parser.add_argument('--controller_mlp_layers', type=int, default=3)
-parser.add_argument('--controller_mlp_hidden_size', type=int, default=200)
-parser.add_argument('--controller_decoder_layers', type=int, default=1)
-parser.add_argument('--controller_decoder_hidden_size', type=int, default=96)
-parser.add_argument('--controller_source_length', type=int, default=40)
-parser.add_argument('--controller_encoder_length', type=int, default=20) # Changed 20 to 2
-parser.add_argument('--controller_decoder_length', type=int, default=40)
-parser.add_argument('--controller_encoder_dropout', type=float, default=0)
-parser.add_argument('--controller_mlp_dropout', type=float, default=0.1)
-parser.add_argument('--controller_decoder_dropout', type=float, default=0)
-parser.add_argument('--controller_l2_reg', type=float, default=1e-4)
-parser.add_argument('--controller_encoder_vocab_size', type=int, default=12)
-parser.add_argument('--controller_decoder_vocab_size', type=int, default=12)
-parser.add_argument('--controller_trade_off', type=float, default=0.8)
-parser.add_argument('--controller_epochs', type=int, default=1000)
-parser.add_argument('--controller_batch_size', type=int, default=100)
-parser.add_argument('--controller_lr', type=float, default=0.001)
-parser.add_argument('--controller_optimizer', type=str, default='adam')
-parser.add_argument('--controller_grad_bound', type=float, default=5.0)
-args = parser.parse_args()
-
-utils.create_exp_dir(args.output_dir, scripts_to_save=glob.glob('*.py'))
-
-log_format = '%(asctime)s %(message)s'
-logging.basicConfig(stream=sys.stdout, level=logging.INFO,
-    format=log_format, datefmt='%m/%d %I:%M:%S %p')
+B=5
 
 
-class CrossEntropyLabelSmooth(nn.Module):
-
-    def __init__(self, num_classes, epsilon):
-        super(CrossEntropyLabelSmooth, self).__init__()
-        self.num_classes = num_classes
-        self.epsilon = epsilon
-        self.logsoftmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, inputs, targets):
-        log_probs = self.logsoftmax(inputs)
-        targets = torch.zeros_like(log_probs).scatter_(1, targets.unsqueeze(1), 1)
-        targets = (1 - self.epsilon) * targets + self.epsilon / self.num_classes
-        loss = (-targets * log_probs).mean(0).sum()
-        return loss
+def item(tensor):
+    if hasattr(tensor, 'item'):
+        return tensor.item()
+    if hasattr(tensor, '__getitem__'):
+        return tensor[0]
+    return tensor
 
 
-def get_builder(dataset):
-    if dataset == 'cifar10':
-        return build_cifar10
-    elif dataset == 'cifar100':
-        return build_cifar100
-    else:
-        return build_imagenet
+class AvgrageMeter(object):
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.avg = 0
+        self.sum = 0
+        self.cnt = 0
+
+    def update(self, val, n=1):
+        self.sum += val * n
+        self.cnt += n
+        self.avg = self.sum / self.cnt
+      
+
+def accuracy(output, target, topk=(1,)):
+    maxk = max(topk)
+    batch_size = target.size(0)
+
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+    res = []
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum(0)
+        res.append(correct_k.mul_(100.0/batch_size))
+    return res
+
+
+class Cutout(object):
+    def __init__(self, length):
+        self.length = length
+
+    def __call__(self, img):
+        h, w = img.size(1), img.size(2)
+        mask = np.ones((h, w), np.float32)
+        y = np.random.randint(h)
+        x = np.random.randint(w)
+
+        y1 = np.clip(y - self.length // 2, 0, h)
+        y2 = np.clip(y + self.length // 2, 0, h)
+        x1 = np.clip(x - self.length // 2, 0, w)
+        x2 = np.clip(x + self.length // 2, 0, w)
+
+        mask[y1: y2, x1: x2] = 0.
+        mask = torch.from_numpy(mask)
+        mask = mask.expand_as(img)
+        img *= mask
+        return img
     
-
-def build_cifar10(model_state_dict=None, optimizer_state_dict=None, **kwargs):
-    epoch = kwargs.pop('epoch')
-    ratio = kwargs.pop('ratio')
-    train_transform, valid_transform = utils._data_transforms_cifar10(args.child_cutout_size)
-    train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
-    valid_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=valid_transform)
     
-    num_train = len(train_data)
-    assert num_train == len(valid_data)
-    indices = list(range(num_train)) 
-    split = int(np.floor(ratio * num_train))
-    np.random.shuffle(indices)
+def _data_transforms_cifar10(cutout_size):
+    CIFAR_MEAN = [0.49139968, 0.48215827, 0.44653124]
+    CIFAR_STD = [0.24703233, 0.24348505, 0.26158768]
 
-    train_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=args.child_batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-        pin_memory=True, num_workers=16)
-    valid_queue = torch.utils.data.DataLoader(
-        valid_data, batch_size=args.child_eval_batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-        pin_memory=True, num_workers=16)
-    
-    model = NASWSNetworkCIFAR(10, args.child_layers, args.child_nodes, args.child_channels, args.child_keep_prob, args.child_drop_path_keep_prob,
-                       args.child_use_aux_head, args.steps)
-    model = model.cuda()
-    train_criterion = nn.CrossEntropyLoss().cuda()
-    eval_criterion = nn.CrossEntropyLoss().cuda()
-    logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
-
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        args.child_lr_max,
-        momentum=0.9,
-        weight_decay=args.child_l2_reg,
-    )
-    if model_state_dict is not None:
-        model.load_state_dict(model_state_dict)
-    if optimizer_state_dict is not None:
-        optimizer.load_state_dict(optimizer_state_dict)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.child_epochs, args.child_lr_min, epoch)
-    return train_queue, valid_queue, model, train_criterion, eval_criterion, optimizer, scheduler
-
-
-def build_cifar100(model_state_dict=None, optimizer_state_dict=None, **kwargs):
-    epoch = kwargs.pop('epoch')
-    ratio = kwargs.pop('ratio')
-    train_transform, valid_transform = utils._data_transforms_cifar10(args.cutout_size)
-    train_data = dset.CIFAR100(root=args.data, train=True, download=True, transform=train_transform)
-    valid_data = dset.CIFAR100(root=args.data, train=True, download=True, transform=valid_transform)
-
-    num_train = len(train_data)
-    assert num_train == len(valid_data)
-    indices = list(range(num_train))    
-    split = int(np.floor(ratio * num_train))
-    np.random.shuffle(indices)
-
-    train_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=args.child_batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-        pin_memory=True, num_workers=16)
-    valid_queue = torch.utils.data.DataLoader(
-        valid_data, batch_size=args.child_eval_batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-        pin_memory=True, num_workers=16)
-    
-    model = NASWSNetworkCIFAR(100, args.child_layers, args.child_nodes, args.child_channels, args.child_keep_prob, args.child_drop_path_keep_prob,
-                       args.child_use_aux_head, args.steps)
-    model = model.cuda()
-    train_criterion = nn.CrossEntropyLoss().cuda()
-    eval_criterion = nn.CrossEntropyLoss().cuda()
-    logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
-
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        args.child_lr_max,
-        momentum=0.9,
-        weight_decay=args.child_l2_reg,
-    )
-    if model_state_dict is not None:
-        model.load_state_dict(model_state_dict)
-    if optimizer_state_dict is not None:
-        optimizer.load_state_dict(optimizer_state_dict)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.child_epochs, args.child_lr_min, epoch)
-    return train_queue, valid_queue, model, train_criterion, eval_criterion, optimizer, scheduler
-
-
-def build_imagenet(model_state_dict=None, optimizer_state_dict=None, **kwargs):
-    ratio = kwargs.pop('ratio')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(224),
+        transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(
-            brightness=0.4,
-            contrast=0.4,
-            saturation=0.4,
-            hue=0.2),
         transforms.ToTensor(),
-        normalize,
+        transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
     ])
+    if cutout_size is not None:
+        train_transform.transforms.append(Cutout(cutout_size))
+
     valid_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
         transforms.ToTensor(),
-        normalize,
-    ])
-    if args.zip_file:
-        logging.info('Loading data from zip file')
-        traindir = os.path.join(args.data, 'train.zip')
-        if args.lazy_load:
-            train_data = utils.ZipDataset(traindir, train_transform)
-        else:
-            logging.info('Loading data into memory')
-            train_data = utils.InMemoryZipDataset(traindir, train_transform, num_workers=32)
-    else:
-        logging.info('Loading data from directory')
-        traindir = os.path.join(args.data, 'train')
-        if args.lazy_load:
-            train_data = dset.ImageFolder(traindir, train_transform)
-        else:
-            logging.info('Loading data into memory')
-            train_data = utils.InMemoryDataset(traindir, train_transform, num_workers=32)
-       
-    num_train = len(train_data)
-    indices = list(range(num_train))
-    np.random.shuffle(indices)
-    split = int(np.floor(ratio * num_train))
-    train_indices = sorted(indices[:split])
-    valid_indices = sorted(indices[split:])
+        transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+        ])
+    return train_transform, valid_transform
 
-    train_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=args.child_batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(train_indices),
-        pin_memory=True, num_workers=16)
-    valid_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=args.child_eval_batch_size,
-        sampler=torch.utils.data.sampler.SubsetRandomSampler(valid_indices),
-        pin_memory=True, num_workers=16)
+
+IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif']
+
+
+def has_file_allowed_extension(filename, extensions):
+    filename_lower = filename.lower()
+    return any(filename_lower.endswith(ext) for ext in extensions)
+
+
+def convert_to_pil(bytes_obj):
+    img = Image.open(BytesIO(bytes_obj))
+    return img.convert('RGB')
+
+
+class ReadImageThread(threading.Thread):
+    def __init__(self, root, fnames, class_id, target_list):
+        threading.Thread.__init__(self)
+        self.root = root
+        self.fnames = fnames
+        self.class_id = class_id
+        self.target_list = target_list
+        
+    def run(self):
+        for fname in self.fnames:
+            if has_file_allowed_extension(fname, IMG_EXTENSIONS):
+                path = os.path.join(self.root, fname)
+                with open(path, 'rb') as f:
+                    image = f.read()
+                item = (image, self.class_id)
+                self.target_list.append(item)
+
+
+class InMemoryDataset(data.Dataset):
+    def __init__(self, path, transform=None, num_workers=1):
+        super(InMemoryDataset, self).__init__()
+        self.path = path
+        self.transform = transform
+        self.samples = []
+        classes, class_to_idx = self.find_classes(self.path)
+        dir = os.path.expanduser(self.path)
+        for target in sorted(os.listdir(dir)):
+            d = os.path.join(dir, target)
+            if not os.path.isdir(d):
+                continue
+            for root, _, fnames in sorted(os.walk(d)):
+                if num_workers == 1:
+                    for fname in sorted(fnames):
+                        if has_file_allowed_extension(fname, IMG_EXTENSIONS):
+                            path = os.path.join(root, fname)
+                            with open(path, 'rb') as f:
+                                image = f.read()
+                            item = (image, class_to_idx[target])
+                            self.samples.append(item)
+                else:
+                    fnames = sorted(fnames)
+                    num_files = len(fnames)
+                    threads = []
+                    res = [[] for i in range(num_workers)]
+                    num_per_worker = num_files // num_workers
+                    for i in range(num_workers):
+                        start_index = num_per_worker * i
+                        end_index = num_files if i == num_workers - 1 else num_per_worker * (i+1)
+                        thread = ReadImageThread(root, fnames[start_index:end_index], class_to_idx[target], res[i])
+                        threads.append(thread)
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join()
+                    for item in res:
+                        self.samples += item
+                    del res, threads
+                    gc.collect()
+        
+    def __len__(self):
+        return len(self.samples)
     
-    model = NASWSNetworkImageNet(1000, args.child_layers, args.child_nodes, args.child_channels, args.child_keep_prob,
-                       args.child_drop_path_keep_prob, args.child_use_aux_head, args.steps)
-    model = model.cuda()
-    train_criterion = CrossEntropyLabelSmooth(1000, args.child_label_smooth).cuda()
-    eval_criterion = nn.CrossEntropyLoss().cuda()
-    logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
-
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        args.child_lr,
-        momentum=0.9,
-        weight_decay=args.child_l2_reg,
-    )
-    if model_state_dict is not None:
-        model.load_state_dict(model_state_dict)
-    if optimizer_state_dict is not None:
-        optimizer.load_state_dict(optimizer_state_dict)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.child_decay_period, gamma=args.child_gamma)
-    return train_queue, valid_queue, model, train_criterion, eval_criterion, optimizer, scheduler
-
-
-def child_train(train_queue, model, optimizer, global_step, arch_pool, arch_pool_prob, criterion):
-    objs = utils.AvgrageMeter()
-    top1 = utils.AvgrageMeter()
-    top5 = utils.AvgrageMeter()
-    model.train()
-    for step, (input, target) in enumerate(train_queue):
-        input = input.cuda().requires_grad_()
-        target = target.cuda()
-
-        optimizer.zero_grad()
-        # sample an arch to train
-        arch = utils.sample_arch(arch_pool, arch_pool_prob)
-        logits, aux_logits = model(input, arch, global_step)
-        global_step += 1
-        loss = criterion(logits, target)
-        if aux_logits is not None:
-            aux_loss = criterion(aux_logits, target)
-            loss += 0.4 * aux_loss
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), args.child_grad_bound)
-        optimizer.step()
-        
-        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        n = input.size(0)
-        objs.update(loss.data, n)
-        top1.update(prec1.data, n)
-        top5.update(prec5.data, n)
-        
-        if (step+1) % 100 == 0:
-            logging.info('Train %03d loss %e top1 %f top5 %f', step+1, objs.avg, top1.avg, top5.avg)
-            logging.info('Arch: %s', ' '.join(map(str, arch[0] + arch[1])))
-
-    return top1.avg, objs.avg, global_step
-
-
-def child_valid(valid_queue, model, arch_pool, criterion):
-    valid_acc_list = []
-    with torch.no_grad():
-        model.eval()
-        for i, arch in enumerate(arch_pool):
-            #for step, (inputs, targets) in enumerate(valid_queue):
-            inputs, targets = next(iter(valid_queue))
-            inputs = inputs.cuda()
-            targets = targets.cuda()
-                
-            logits, _ = model(inputs, arch, bn_train=True)
-            loss = criterion(logits, targets)
-                
-            prec1, prec5 = utils.accuracy(logits, targets, topk=(1, 5))
-            valid_acc_list.append(prec1.data/100)
-            
-            if (i+1) % 100 == 0:
-                logging.info('Valid arch %s\n loss %.2f top1 %f top5 %f', ' '.join(map(str, arch[0] + arch[1])), loss, prec1, prec5)
-        
-    return valid_acc_list
-
-
-def train_and_evaluate_top_on_cifar10(archs, train_queue, valid_queue):
-    res = []
-    train_criterion = nn.CrossEntropyLoss().cuda()
-    eval_criterion = nn.CrossEntropyLoss().cuda()
-    objs = utils.AvgrageMeter()
-    top1 = utils.AvgrageMeter()
-    top5 = utils.AvgrageMeter()
-    for i, arch in enumerate(archs):
-        objs.reset()
-        top1.reset()
-        top5.reset()
-        logging.info('Train and evaluate the {} arch'.format(i+1))
-        model = NASNetworkCIFAR(args, 10, args.child_layers, args.child_nodes, args.child_channels, 0.6, 0.8,
-                        True, args.steps, arch)
-        model = model.cuda()
-        model.train()
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            args.child_lr_max,
-            momentum=0.9,
-            weight_decay=args.child_l2_reg,
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 10, args.child_lr_min)
-        global_step = 0
-        for e in range(10):
-            scheduler.step()
-            for step, (input, target) in enumerate(train_queue):
-                input = input.cuda().requires_grad_()
-                target = target.cuda()
-
-                optimizer.zero_grad()
-                # sample an arch to train
-                logits, aux_logits = model(input, global_step)
-                global_step += 1
-                loss = train_criterion(logits, target)
-                if aux_logits is not None:
-                    aux_loss = train_criterion(aux_logits, target)
-                    loss += 0.4 * aux_loss
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), args.child_grad_bound)
-                optimizer.step()
-            
-                prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-                n = input.size(0)
-                objs.update(loss.data, n)
-                top1.update(prec1.data, n)
-                top5.update(prec5.data, n)
-            
-                if (step+1) % 100 == 0:
-                    logging.info('Train epoch %03d %03d loss %e top1 %f top5 %f', e+1, step+1, objs.avg, top1.avg, top5.avg)
-        objs.reset()
-        top1.reset()
-        top5.reset()
-        with torch.no_grad():
-            model.eval()
-            for step, (input, target) in enumerate(valid_queue):
-                input = input.cuda()
-                target = target.cuda()
-            
-                logits, _ = model(input)
-                loss = eval_criterion(logits, target)
-            
-                prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-                n = input.size(0)
-                objs.update(loss.data, n)
-                top1.update(prec1.data, n)
-                top5.update(prec5.data, n)
-            
-                if (step+1) % 100 == 0:
-                    logging.info('valid %03d %e %f %f', step+1, objs.avg, top1.avg, top5.avg)
-        res.append(top1.avg)
-    return res
-
-
-def train_and_evaluate_top_on_cifar100(archs, train_queue, valid_queue):
-    res = []
-    train_criterion = nn.CrossEntropyLoss().cuda()
-    eval_criterion = nn.CrossEntropyLoss().cuda()
-    objs = utils.AvgrageMeter()
-    top1 = utils.AvgrageMeter()
-    top5 = utils.AvgrageMeter()
-    for i, arch in enumerate(archs):
-        objs.reset()
-        top1.reset()
-        top5.reset()
-        logging.info('Train and evaluate the {} arch'.format(i+1))
-        model = NASNetworkCIFAR(args, 100, args.child_layers, args.child_nodes, args.child_channels, 0.6, 0.8,
-                        True, args.steps, arch)
-        model = model.cuda()
-        model.train()
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            args.child_lr_max,
-            momentum=0.9,
-            weight_decay=args.child_l2_reg,
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 10, args.child_lr_min)
-        global_step = 0
-        for e in range(10):
-            scheduler.step()
-            for step, (input, target) in enumerate(train_queue):
-                input = input.cuda().requires_grad_()
-                target = target.cuda()
-
-                optimizer.zero_grad()
-                # sample an arch to train
-                logits, aux_logits = model(input, global_step)
-                global_step += 1
-                loss = train_criterion(logits, target)
-                if aux_logits is not None:
-                    aux_loss = train_criterion(aux_logits, target)
-                    loss += 0.4 * aux_loss
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), args.child_grad_bound)
-                optimizer.step()
-            
-                prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-                n = input.size(0)
-                objs.update(loss.data, n)
-                top1.update(prec1.data, n)
-                top5.update(prec5.data, n)
-            
-                if (step+1) % 100 == 0:
-                    logging.info('Train %3d %03d loss %e top1 %f top5 %f', e+1, step+1, objs.avg, top1.avg, top5.avg)
-        objs.reset()
-        top1.reset()
-        top5.reset()
-        with torch.no_grad():
-            model.eval()
-            for step, (input, target) in enumerate(valid_queue):
-                input = input.cuda()
-                target = target.cuda()
-            
-                logits, _ = model(input)
-                loss = eval_criterion(logits, target)
-            
-                prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-                n = input.size(0)
-                objs.update(loss.data, n)
-                top1.update(prec1.data, n)
-                top5.update(prec5.data, n)
-            
-                if (step+1) % 100 == 0:
-                    logging.info('valid %03d %e %f %f', step+1, objs.avg, top1.avg, top5.avg)
-        res.append(top1.avg)
-    return res
-
-
-def train_and_evaluate_top_on_imagenet(archs, train_queue, valid_queue):
-    res = []
-    train_criterion = nn.CrossEntropyLoss().cuda()
-    eval_criterion = nn.CrossEntropyLoss().cuda()
-    objs = utils.AvgrageMeter()
-    top1 = utils.AvgrageMeter()
-    top5 = utils.AvgrageMeter()
-    for i, arch in enumerate(archs):
-        objs.reset()
-        top1.reset()
-        top5.reset()
-        logging.info('Train and evaluate the {} arch'.format(i+1))
-        model = NASNetworkImageNet(args, 1000, args.child_layers, args.child_nodes, args.child_channels, 1.0, 1.0,
-                        True, args.steps, arch)
-        model = model.cuda()
-        model.train()
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            args.child_lr,
-            momentum=0.9,
-            weight_decay=args.child_l2_reg,
-        )
-        for step, (input, target) in enumerate(train_queue):
-            input = input.cuda().requires_grad_()
-            target = target.cuda()
-
-            optimizer.zero_grad()
-            # sample an arch to train
-            logits, aux_logits = model(input, step)
-            loss = train_criterion(logits, target)
-            if aux_logits is not None:
-                aux_loss = train_criterion(aux_logits, target)
-                loss += 0.4 * aux_loss
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), args.child_grad_bound)
-            optimizer.step()
-            
-            prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-            n = input.size(0)
-            objs.update(loss.data, n)
-            top1.update(prec1.data, n)
-            top5.update(prec5.data, n)
-            
-            if (step+1) % 100 == 0:
-                logging.info('Train %03d loss %e top1 %f top5 %f', step+1, objs.avg, top1.avg, top5.avg)
-            if step+1 == 500:
-                break
-
-        objs.reset()
-        top1.reset()
-        top5.reset()
-        with torch.no_grad():
-            model.eval()
-            for step, (input, target) in enumerate(valid_queue):
-                input = input.cuda()
-                target = target.cuda()
-            
-                logits, _ = model(input)
-                loss = eval_criterion(logits, target)
-            
-                prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-                n = input.size(0)
-                objs.update(loss.data, n)
-                top1.update(prec1.data, n)
-                top5.update(prec5.data, n)
-            
-                if (step+1) % 100 == 0:
-                    logging.info('valid %03d %e %f %f', step+1, objs.avg, top1.avg, top5.avg)
-        res.append(top1.avg)
-    return res
-        
-        
-def nao_train(train_queue, model, optimizer):
-    objs = utils.AvgrageMeter()
-    mse = utils.AvgrageMeter()
-    nll = utils.AvgrageMeter()
-    model.train()
-    for step, sample in enumerate(train_queue):
-        encoder_input = sample['encoder_input']
-        encoder_target = sample['encoder_target']
-        decoder_input = sample['decoder_input']
-        decoder_target = sample['decoder_target']
-        
-        encoder_input = encoder_input.cuda()
-        encoder_target = encoder_target.cuda().requires_grad_()
-        decoder_input = decoder_input.cuda()
-        decoder_target = decoder_target.cuda()
-        
-        optimizer.zero_grad()
-        predict_value, log_prob, arch = model(encoder_input, decoder_input)
-        loss_1 = F.mse_loss(predict_value.squeeze(), encoder_target.squeeze())
-        loss_2 = F.nll_loss(log_prob.contiguous().view(-1, log_prob.size(-1)), decoder_target.view(-1))
-        loss = args.controller_trade_off * loss_1 + (1 - args.controller_trade_off) * loss_2
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.controller_grad_bound)
-        optimizer.step()
-        
-        n = encoder_input.size(0)
-        objs.update(loss.data, n)
-        mse.update(loss_1.data, n)
-        nll.update(loss_2.data, n)
-        
-    return objs.avg, mse.avg, nll.avg
-
-
-def nao_valid(queue, model):
-    inputs = []
-    targets = []
-    predictions = []
-    archs = []
-    with torch.no_grad():
-        model.eval()
-        for step, sample in enumerate(queue):
-            encoder_input = sample['encoder_input']
-            encoder_target = sample['encoder_target']
-            decoder_target = sample['decoder_target']
-            
-            encoder_input = encoder_input.cuda()
-            encoder_target = encoder_target.cuda()
-            decoder_target = decoder_target.cuda()
-            
-            predict_value, logits, arch = model(encoder_input)
-            n = encoder_input.size(0)
-            inputs += encoder_input.data.squeeze().tolist()
-            targets += encoder_target.data.squeeze().tolist()
-            predictions += predict_value.data.squeeze().tolist()
-            archs += arch.data.squeeze().tolist()
-    pa = utils.pairwise_accuracy(targets, predictions)
-    hd = utils.hamming_distance(inputs, archs)
-    return pa, hd
-
-
-def nao_infer(queue, model, step, direction='+'):
-    new_arch_list = []
-    model.eval()
-    for i, sample in enumerate(queue):
-        encoder_input = sample['encoder_input']
-        encoder_input = encoder_input.cuda()
-        model.zero_grad()
-        new_arch = model.generate_new_arch(encoder_input, step, direction=direction)
-        new_arch_list.extend(new_arch.data.squeeze().tolist())
-    return new_arch_list
-
-def nao_infer_btp(queue, model, step, direction='+'):
-    new_arch_list = []
-    model.eval()
-    for i, sample in enumerate(queue):
-        encoder_input = sample['encoder_input']
-        encoder_input = encoder_input.cuda()
-        model.zero_grad()
-        new_archs = model.generate_new_arch_with_mras(encoder_input, step, direction=direction)
-        new_arch_list.extend(new_archs.data.squeeze().tolist())
-    return new_arch_list
-
-
-def main():
-    if not torch.cuda.is_available():
-        logging.info('no gpu device available')
-        sys.exit(1)
-        
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    cudnn.enabled = True
-    cudnn.benchmark = True
-    cudnn.deterministic = True
+    def __getitem__(self, index):
+        sample, target = self.samples[index]
+        sample = convert_to_pil(sample)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample, target
     
-    args.steps = int(np.ceil(45000 / args.child_batch_size)) * args.child_epochs
+    def __repr__(self):
+        fmt_str = 'Dataset ' + self.__class__.__name__ + '\n'
+        fmt_str += '    Number of datapoints: {}\n'.format(self.__len__())
+        fmt_str += '    Root Location: {}\n'.format(self.path)
+        tmp = '    Transforms (if any): '
+        fmt_str += '{0}{1}\n'.format(tmp, self.transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
+        tmp = '    Target Transforms (if any): '
+        fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
+        return fmt_str
 
-    logging.info("args = %s", args)
-
-    if args.child_arch_pool is not None:
-        logging.info('Architecture pool is provided, loading')
-        with open(args.child_arch_pool) as f:
-            archs = f.read().splitlines()
-            archs = list(map(utils.build_dag, archs))
-            child_arch_pool = archs
-    elif os.path.exists(os.path.join(args.output_dir, 'arch_pool')):
-        logging.info('Architecture pool is founded, loading')
-        with open(os.path.join(args.output_dir, 'arch_pool')) as f:
-            archs = f.read().splitlines()
-            archs = list(map(utils.build_dag, archs))
-            child_arch_pool = archs
-    else:
-        child_arch_pool = None
-
-    child_eval_epochs = eval(args.child_eval_epochs)
-    build_fn = get_builder(args.dataset)
-    train_queue, valid_queue, model, train_criterion, eval_criterion, optimizer, scheduler = build_fn(ratio=0.9, epoch=-1)
-
-    nao = NAO(
-        args.controller_encoder_layers,
-        args.controller_encoder_vocab_size,
-        args.controller_encoder_hidden_size,
-        args.controller_encoder_dropout,
-        args.controller_encoder_length,
-        args.controller_source_length,
-        args.controller_encoder_emb_size,
-        args.controller_mlp_layers,
-        args.controller_mlp_hidden_size,
-        args.controller_mlp_dropout,
-        args.controller_decoder_layers,
-        args.controller_decoder_vocab_size,
-        args.controller_decoder_hidden_size,
-        args.controller_decoder_dropout,
-        args.controller_decoder_length,
-    )
-    nao = nao.cuda()
-    logging.info("Encoder-Predictor-Decoder param size = %fMB", utils.count_parameters_in_MB(nao))
-
-    # Train child model
-    if child_arch_pool is None:
-        logging.info('Architecture pool is not provided, randomly generating now')
-        child_arch_pool = utils.generate_arch(args.controller_seed_arch, args.child_nodes, 5)  # [[[conv],[reduc]]]
-    child_arch_pool_prob = None
-
-    eval_points = utils.generate_eval_points(child_eval_epochs, 0, args.child_epochs)
-    step = 0
-    for epoch in range(1, args.child_epochs + 1):
-        scheduler.step()
-        lr = scheduler.get_lr()[0]
-        logging.info('epoch %d lr %e', epoch, lr)
-        # sample an arch to train
-        train_acc, train_obj, step = child_train(train_queue, model, optimizer, step, child_arch_pool, child_arch_pool_prob, train_criterion)
-        logging.info('train_acc %f', train_acc)
+    @staticmethod
+    def find_classes(root):
+        classes = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+        classes.sort()
+        class_to_idx = {classes[i]: i for i in range(len(classes))}
+        return classes, class_to_idx
     
-        if epoch not in eval_points:
-            continue
-        # Evaluate seed archs
-        valid_accuracy_list = child_valid(valid_queue, model, child_arch_pool, eval_criterion)
 
-        # Output archs and evaluated error rate
-        old_archs = child_arch_pool
-        old_archs_perf = valid_accuracy_list
+class ZipDataset(data.Dataset):
+    def __init__(self, path, transform=None):
+        super(ZipDataset, self).__init__()
+        self.path = os.path.expanduser(path)
+        self.transform = transform
+        self.samples = []
+        with zipfile.ZipFile(self.path, 'r') as reader:
+            classes, class_to_idx = self.find_classes(reader)
+            fnames = sorted(reader.namelist())
+        for fname in fnames:
+            if self.is_directory(fname):
+                continue
+            target = self.get_target(fname)
+            item = (fname, class_to_idx[target])
+            self.samples.append(item)
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, index):
+        sample, target = self.samples[index]
+        with zipfile.ZipFile(self.path, 'r') as reader:
+            sample = reader.read(sample)
+        sample = convert_to_pil(sample)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample, target
+    
+    def __repr__(self):
+        fmt_str = 'Dataset ' + self.__class__.__name__ + '\n'
+        fmt_str += '    Number of datapoints: {}\n'.format(self.__len__())
+        fmt_str += '    Root Location: {}\n'.format(self.path)
+        tmp = '    Transforms (if any): '
+        fmt_str += '{0}{1}\n'.format(tmp, self.transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
+        tmp = '    Target Transforms (if any): '
+        fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
+        return fmt_str
+    
+    @staticmethod
+    def is_directory(fname):
+        if fname.startswith('n') and fname.endswith('/'):
+            return True
+        return False
+    
+    @staticmethod
+    def get_target(fname):
+        assert fname.startswith('n')
+        return fname.split('/')[0]
+    
+    @staticmethod
+    def find_classes(reader):
+        classes = [ZipDataset.get_target(name) for name in reader.namelist() if ZipDataset.is_directory(name)]
+        classes.sort()
+        class_to_idx = {classes[i]: i for i in range(len(classes))}
+        return classes, class_to_idx
 
-        old_archs_perf = torch.tensor(old_archs_perf)
 
-        # Sort indices in descending order based on old_archs_perf
-        old_archs_sorted_indices = torch.argsort(old_archs_perf, descending=True)
+class ReadZipImageThread(threading.Thread):
+    def __init__(self, reader, fnames, class_to_idx, target_list):
+        threading.Thread.__init__(self)
+        self.reader = reader
+        self.fnames = fnames
+        self.target_list = target_list
+        self.class_to_idx = class_to_idx
+    
+    def run(self):
+        for fname in self.fnames:
+            if InMemoryZipDataset.is_directory(fname):
+                continue
+            image = self.reader.read(fname)
+            class_id = self.class_to_idx[InMemoryZipDataset.get_target(fname)]
+            item = (image, class_id)
+            self.target_list.append(item)
 
-        # old_archs_sorted_indices = np.argsort(old_archs_perf)[::-1]
-        
-        old_archs = [old_archs[i] for i in old_archs_sorted_indices]
-        old_archs_perf = [old_archs_perf[i] for i in old_archs_sorted_indices]
-        with open(os.path.join(args.output_dir, 'arch_pool.{}'.format(epoch)), 'w') as fa:
-            with open(os.path.join(args.output_dir, 'arch_pool.perf.{}'.format(epoch)), 'w') as fp:
-                with open(os.path.join(args.output_dir, 'arch_pool'), 'w') as fa_latest:
-                    with open(os.path.join(args.output_dir, 'arch_pool.perf'), 'w') as fp_latest:
-                        for arch, perf in zip(old_archs, old_archs_perf):
-                            arch = ' '.join(map(str, arch[0] + arch[1]))
-                            fa.write('{}\n'.format(arch))
-                            fa_latest.write('{}\n'.format(arch))
-                            fp.write('{}\n'.format(perf))
-                            fp_latest.write('{}\n'.format(perf))
-                            
-        if epoch == args.child_epochs:
-            break
 
-        # Train Encoder-Predictor-Decoder
-        logging.info('Training Encoder-Predictor-Decoder')
-        encoder_input = list(map(lambda x: utils.parse_arch_to_seq(x[0], 2) + utils.parse_arch_to_seq(x[1], 2), old_archs))
-        # [[conv, reduc]]
-        min_val = min(old_archs_perf)
-        max_val = max(old_archs_perf)
-        encoder_target = [(i - min_val) / (max_val - min_val) for i in old_archs_perf]
-
-        if args.controller_expand:
-            dataset = list(zip(encoder_input, encoder_target))
-            n = len(dataset)
-            ratio = 0.9
-            split = int(n*ratio)
-            np.random.shuffle(dataset)
-            encoder_input, encoder_target = list(zip(*dataset))
-            train_encoder_input = list(encoder_input[:split])
-            train_encoder_target = list(encoder_target[:split])
-            valid_encoder_input = list(encoder_input[split:])
-            valid_encoder_target = list(encoder_target[split:])
-            for _ in range(args.controller_expand-1):
-                for src, tgt in zip(encoder_input[:split], encoder_target[:split]):
-                    a = np.random.randint(0, args.child_nodes)
-                    b = np.random.randint(0, args.child_nodes)
-                    src = src[:4 * a] + src[4 * a + 2:4 * a + 4] + \
-                            src[4 * a:4 * a + 2] + src[4 * (a + 1):20 + 4 * b] + \
-                            src[20 + 4 * b + 2:20 + 4 * b + 4] + src[20 + 4 * b:20 + 4 * b + 2] + \
-                            src[20 + 4 * (b + 1):]
-                    train_encoder_input.append(src)
-                    train_encoder_target.append(tgt)
+class InMemoryZipDataset(data.Dataset):
+    def __init__(self, path, transform=None, num_workers=1):
+        super(InMemoryZipDataset, self).__init__()
+        self.path = os.path.expanduser(path)
+        self.transform = transform
+        self.samples = []
+        reader = zipfile.ZipFile(self.path, 'r')
+        classes, class_to_idx = self.find_classes(reader)
+        fnames = sorted(reader.namelist())
+        if num_workers == 1:
+            for fname in fnames:
+                if self.is_directory(fname):
+                    continue
+                target = self.get_target(fname)
+                image = reader.read(fname)
+                item = (image, class_to_idx[target])
+                self.samples.append(item)
         else:
-            train_encoder_input = encoder_input
-            train_encoder_target = encoder_target
-            valid_encoder_input = encoder_input
-            valid_encoder_target = encoder_target
-        logging.info('Train data: {}\tValid data: {}'.format(len(train_encoder_input), len(valid_encoder_input)))
+            num_files = len(fnames)
+            threads = []
+            res = [[] for i in range(num_workers)]
+            num_per_worker = num_files // num_workers
+            for i in range(num_workers):
+                start_index = num_per_worker * i
+                end_index = num_files if i == num_workers - 1 else (i+1) * num_per_worker
+                thread = ReadZipImageThread(reader, fnames[start_index:end_index], class_to_idx, res[i])
+                threads.append(thread)
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            for item in res:
+                self.samples += item
+            del res, threads
+            gc.collect()
+        reader.close()
+            
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, index):
+        sample, target = self.samples[index]
+        sample = convert_to_pil(sample)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample, target
+    
+    def __repr__(self):
+        fmt_str = 'Dataset ' + self.__class__.__name__ + '\n'
+        fmt_str += '    Number of datapoints: {}\n'.format(self.__len__())
+        fmt_str += '    Root Location: {}\n'.format(self.path)
+        tmp = '    Transforms (if any): '
+        fmt_str += '{0}{1}\n'.format(tmp, self.transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
+        tmp = '    Target Transforms (if any): '
+        fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
+        return fmt_str
+    
+    @staticmethod
+    def is_directory(fname):
+        if fname.startswith('n') and fname.endswith('/'):
+            return True
+        return False
+    
+    @staticmethod
+    def get_target(fname):
+        assert fname.startswith('n')
+        return fname.split('/')[0]
 
-        nao_train_dataset = utils.NAODataset(train_encoder_input, train_encoder_target, True, swap=True if args.controller_expand is None else False)
-        nao_valid_dataset = utils.NAODataset(valid_encoder_input, valid_encoder_target, False)
-        nao_train_queue = torch.utils.data.DataLoader(
-            nao_train_dataset, batch_size=args.controller_batch_size, shuffle=True, pin_memory=True)
-        nao_valid_queue = torch.utils.data.DataLoader(
-            nao_valid_dataset, batch_size=args.controller_batch_size, shuffle=False, pin_memory=True)
-        nao_optimizer = torch.optim.Adam(nao.parameters(), lr=args.controller_lr, weight_decay=args.controller_l2_reg)
-        for nao_epoch in range(1, args.controller_epochs+1):
-            nao_loss, nao_mse, nao_ce = nao_train(nao_train_queue, nao, nao_optimizer)
-            logging.info("epoch %04d train loss %.6f mse %.6f ce %.6f", nao_epoch, nao_loss, nao_mse, nao_ce)
-            if nao_epoch % 100 == 0:
-                pa, hs = nao_valid(nao_valid_queue, nao)
-                logging.info("Evaluation on valid data")
-                logging.info('epoch %04d pairwise accuracy %.6f hamming distance %.6f', epoch, pa, hs)
+    @staticmethod
+    def find_classes(fname):
+        classes = [ZipDataset.get_target(name) for name in fname.namelist() if ZipDataset.is_directory(name)]
+        classes.sort()
+        class_to_idx = {classes[i]: i for i in range(len(classes))}
+        return classes, class_to_idx
 
-        # Generate new archs
-        new_archs = []
-        max_step_size = 50
-        predict_step_size = 0
-        top100_archs = list(map(lambda x: utils.parse_arch_to_seq(x[0], 2) + utils.parse_arch_to_seq(x[1], 2), old_archs[:100]))
-        nao_infer_dataset = utils.NAODataset(top100_archs, None, False)
-        nao_infer_queue = torch.utils.data.DataLoader(
-            nao_infer_dataset, batch_size=len(nao_infer_dataset), shuffle=False, pin_memory=True)
-        # print("NAO infer Queue: ")
-        # while len(new_archs) < args.controller_new_arch:
-        #     predict_step_size += 1
-        #     logging.info('Generate new architectures with step size %d', predict_step_size)
-        #     new_arch = nao_infer(nao_infer_queue, nao, predict_step_size, direction='+')
-        #     for arch in new_arch:
-        #         if arch not in encoder_input and arch not in new_archs:
-        #             new_archs.append(arch)
-        #         if len(new_archs) >= args.controller_new_arch:
-        #             break
-        #     logging.info('%d new archs generated now', len(new_archs))
-        #     if predict_step_size > max_step_size:
-        #         break
-        #         # [[conv, reduc]]
-        # Instead of passing each architecture, I want to send the queue at once, and generate new archs as a whole batch
-        new_arch_btp = nao_infer_btp(nao_infer_queue, nao, 1, direction='+')
-        # print("Encoder Input: ", encoder_input)
-        # print("New archs: ", new_archs)
-        for arch in new_arch_btp:
-            if arch not in encoder_input and arch not in new_archs:
-                new_archs.append(arch)
-            if len(new_archs) >= args.controller_new_arch:
-                break
-        new_archs = list(map(lambda x: utils.parse_seq_to_arch(x, 2), new_archs))  # [[[conv],[reduc]]]
-        num_new_archs = len(new_archs)
-        logging.info("Generate %d new archs", num_new_archs)
-        # replace bottom archs
-        new_arch_pool = old_archs[:len(old_archs) - num_new_archs] + new_archs
-        logging.info("Totally %d architectures now to train", len(new_arch_pool))
 
-        child_arch_pool = new_arch_pool
-        with open(os.path.join(args.output_dir, 'arch_pool'), 'w') as f:
-            for arch in new_arch_pool:
-                arch = ' '.join(map(str, arch[0] + arch[1]))
-                f.write('{}\n'.format(arch))
+class NAODataset(torch.utils.data.Dataset):
+    def __init__(self, inputs, targets=None, train=True, sos_id=0, eos_id=0, swap=False):
+        super(NAODataset, self).__init__()
+        if targets is not None:
+            assert len(inputs) == len(targets)
+        self.inputs = copy.deepcopy(inputs)
+        self.targets = copy.deepcopy(targets)
+        self.train = train
+        self.sos_id = sos_id
+        self.eos_id = eos_id
+        self.swap = swap
+    
+    def __getitem__(self, index):
+        encoder_input = self.inputs[index]
+        encoder_target = None
+        if self.targets is not None:
+            encoder_target = [self.targets[index]]
+        if self.swap:
+            a = np.random.randint(0, 5)
+            b = np.random.randint(0, 5)
+            encoder_input = encoder_input[:4 * a] + encoder_input[4 * a + 2:4 * a + 4] + \
+                            encoder_input[4 * a:4 * a + 2] + encoder_input[4 * (a + 1):20 + 4 * b] + \
+                            encoder_input[20 + 4 * b + 2:20 + 4 * b + 4] + encoder_input[20 + 4 * b:20 + 4 * b + 2] + \
+                            encoder_input[20 + 4 * (b + 1):]
+        if self.train:
+            decoder_input = [self.sos_id] + encoder_input[:-1]
+            sample = {
+                'encoder_input': torch.LongTensor(encoder_input),
+                'encoder_target': torch.FloatTensor(encoder_target),
+                'decoder_input': torch.LongTensor(decoder_input),
+                'decoder_target': torch.LongTensor(encoder_input),
+            }
+        else:
+            sample = {
+                'encoder_input': torch.LongTensor(encoder_input),
+                'decoder_target': torch.LongTensor(encoder_input),
+            }
+            if encoder_target is not None:
+                sample['encoder_target'] = torch.FloatTensor(encoder_target)
+        return sample
+    
+    def __len__(self):
+        return len(self.inputs)
 
-        
-        child_arch_pool_prob = None
 
-    logging.info('Finish Searching')
-    logging.info('Reranking top 5 architectures')
-    # reranking top 5
-    top_archs = old_archs[:5]
-    if args.dataset == 'cifar10':
-        top_archs_perf = train_and_evaluate_top_on_cifar10(top_archs, train_queue, valid_queue)
-    elif args.dataset == 'cifar100':
-        top_archs_perf = train_and_evaluate_top_on_cifar100(top_archs, train_queue, valid_queue)
-    else:
-        top_archs_perf = train_and_evaluate_top_on_imagenet(top_archs, train_queue, valid_queue)
-    top_archs_sorted_indices = np.argsort([t.cpu().numpy() for t in top_archs_perf])[::-1]
-    top_archs = [top_archs[i] for i in top_archs_sorted_indices]
-    top_archs_perf = [top_archs_perf[i] for i in top_archs_sorted_indices]
-    with open(os.path.join(args.output_dir, 'arch_pool.final'), 'w') as fa:
-        with open(os.path.join(args.output_dir, 'arch_pool.perf.final'), 'w') as fp:
-            for arch, perf in zip(top_archs, top_archs_perf):
-                arch = ' '.join(map(str, arch[0] + arch[1]))
-                fa.write('{}\n'.format(arch))
-                fp.write('{}\n'.format(perf))
+def count_parameters_in_MB(model):
+    return np.sum(np.prod(v.size()) for name, v in model.named_parameters() if "auxiliary" not in name)/1e6
+
+
+def save_checkpoint(state, is_best, save):
+    filename = os.path.join(save, 'checkpoint.pth.tar')
+    torch.save(state, filename)
+    if is_best:
+        best_filename = os.path.join(save, 'model_best.pth.tar')
+        shutil.copyfile(filename, best_filename)
+      
+
+def save(model_path, args, model, epoch, step, optimizer, best_acc_top1, is_best=True):
+    if hasattr(model, 'module'):
+        model = model.module
+    state_dict = {
+        'args': args,
+        'model': model.state_dict() if model else {},
+        'epoch': epoch,
+        'step': step,
+        'optimizer': optimizer.state_dict(),
+        'best_acc_top1': best_acc_top1,
+    }
+    filename = os.path.join(model_path, 'checkpoint{}.pt'.format(epoch))
+    torch.save(state_dict, filename)
+    newest_filename = os.path.join(model_path, 'checkpoint.pt')
+    shutil.copyfile(filename, newest_filename)
+    if is_best:
+        best_filename = os.path.join(model_path, 'checkpoint_best.pt')
+        shutil.copyfile(filename, best_filename)
   
 
-if __name__ == '__main__':
-    main()
+def load(model_path):
+    newest_filename = os.path.join(model_path, 'checkpoint.pt')
+    if not os.path.exists(newest_filename):
+        return None, None, 0, 0, None, 0
+    state_dict = torch.load(newest_filename)
+    args = state_dict['args']
+    model_state_dict = state_dict['model']
+    epoch = state_dict['epoch']
+    step = state_dict['step']
+    optimizer_state_dict = state_dict['optimizer']
+    best_acc_top1 = state_dict.get('best_acc_top1')
+    return args, model_state_dict, epoch, step, optimizer_state_dict, best_acc_top1
+
+  
+def create_exp_dir(path, scripts_to_save=None):
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print('Experiment dir : {}'.format(path))
+
+    if scripts_to_save is not None:
+        os.makedirs(os.path.join(path, 'scripts'), exist_ok=True)
+        for script in scripts_to_save:
+            dst_file = os.path.join(path, 'scripts', os.path.basename(script))
+            shutil.copyfile(script, dst_file)
+
+
+def sample_arch(arch_pool, prob=None):
+    N = len(arch_pool)
+    indices = [i for i in range(N)]
+    if prob is not None:
+        prob = np.array(prob, dtype=np.float32)
+        prob = prob / prob.sum()
+        index = np.random.choice(indices, p=prob)
+    else:
+        index = np.random.choice(indices)
+    arch = arch_pool[index]
+    return arch
+
+
+def generate_arch(n, num_nodes, num_ops=7):
+    def _get_arch():
+        arch = []
+        for i in range(2, num_nodes+2):
+            p1 = np.random.randint(0, i)
+            op1 = np.random.randint(0, num_ops)
+            p2 = np.random.randint(0, i)
+            op2 = np.random.randint(0 ,num_ops)
+            arch.extend([p1, op1, p2, op2])
+        return arch
+    archs = [[_get_arch(), _get_arch()] for i in range(n)] #[[[conv],[reduc]]]
+    return archs
+
+
+def build_dag(arch):
+    if arch is None:
+        return None, None
+    # assume arch is the format [idex, op ...] where index is in [0, 5] and op in [0, 10]
+    arch = list(map(int, arch.strip().split()))
+    length = len(arch)
+    conv_dag = arch[:length//2]
+    reduc_dag = arch[length//2:]
+    return conv_dag, reduc_dag
+
+
+def parse_arch_to_seq(cell, branch_length):
+    assert branch_length in [2, 3]
+    seq = []
+    
+    def _parse_op(op):
+        if op == 0:
+            return 7, 12
+        if op == 1:
+            return 8, 11
+        if op == 2:
+            return 8, 12
+        if op == 3:
+            return 9, 11
+        if op == 4:
+            return 10, 11
+
+    for i in range(B):
+        prev_node1 = cell[4*i]+1
+        prev_node2 = cell[4*i+2]+1
+        if branch_length == 2:
+            op1 = cell[4*i+1] + 7
+            op2 = cell[4*i+3] + 7
+            seq.extend([prev_node1, op1, prev_node2, op2])
+        else:
+            op11, op12 = _parse_op(cell[4*i+1])
+            op21, op22 = _parse_op(cell[4*i+3])
+            seq.extend([prev_node1, op11, op12, prev_node2, op21, op22]) #nopknopk
+    return seq
+
+
+def parse_seq_to_arch(seq, branch_length):
+    n = len(seq)
+    assert branch_length in [2, 3]
+    assert n // 2 // 5 // 2 == branch_length
+    
+    def _parse_cell(cell_seq):
+        cell_arch = []
+        
+        def _recover_op(op1, op2):
+            if op1 == 7:
+                return 0
+            if op1 == 8:
+                if op2 == 11:
+                    return 1
+                if op2 == 12:
+                    return 2
+            if op1 == 9:
+                return 3
+            if op1 == 10:
+                return 4
+        if branch_length == 2:
+            for i in range(B):
+                p1 = cell_seq[4*i] - 1
+                op1 = cell_seq[4*i+1] - 7
+                p2 = cell_seq[4*i+2] - 1
+                op2 = cell_seq[4*i+3] - 7
+                cell_arch.extend([p1, op1, p2, op2])
+            return cell_arch
+        else:
+            for i in range(B):
+                p1 = cell_seq[6*i] - 1
+                op11 = cell_seq[6*i+1]
+                op12 = cell_seq[6*i+2]
+                op1 = _recover_op(op11, op12)
+                p2 = cell_seq[6*i+3] - 1
+                op21 = cell_seq[6*i+4]
+                op22 = cell_seq[6*i+5]
+                op2 = _recover_op(op21, op22)
+                cell_arch.extend([p1, op1, p2, op2])
+            return cell_arch
+    conv_seq = seq[:n//2]
+    reduc_seq = seq[n//2:]
+    conv_arch = _parse_cell(conv_seq)
+    reduc_arch = _parse_cell(reduc_seq)
+    arch = [conv_arch, reduc_arch]
+    return arch
+
+
+def pairwise_accuracy(la, lb):
+    n = len(la)
+    assert n == len(lb)
+    total = 0
+    count = 0
+    for i in range(n):
+        for j in range(i+1, n):
+            if la[i] >= la[j] and lb[i] >= lb[j]:
+                count += 1
+            if la[i] < la[j] and lb[i] < lb[j]:
+                count += 1
+            total += 1
+    return float(count) / total
+
+
+def hamming_distance(la, lb):
+    N = len(la)
+    assert N == len(lb)
+  
+    def _hamming_distance(s1, s2):
+        n = len(s1)
+        assert n == len(s2)
+        c = 0
+        for i, j in zip(s1, s2):
+            if i != j:
+                c += 1
+        return c
+  
+    dis = 0
+    for i in range(N):
+        line1 = la[i]
+        line2 = lb[i]
+        dis += _hamming_distance(line1, line2)
+    return dis / N
+
+
+def generate_eval_points(eval_epochs, stand_alone_epoch, total_epochs):
+    if isinstance(eval_epochs, list):
+        return eval_epochs
+    assert isinstance(eval_epochs, int)
+    res = []
+    eval_point = eval_epochs - stand_alone_epoch
+    while eval_point + stand_alone_epoch <= total_epochs:
+        res.append(eval_point)
+        eval_point += eval_epochs
+    return res

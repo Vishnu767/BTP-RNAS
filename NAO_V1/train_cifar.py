@@ -23,9 +23,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--mode', type=str, default='train',
                     choices=['train', 'test'])
 parser.add_argument('--data', type=str, default='data/cifar10')
-parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10, cifar100'])
+parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10, cifar100','cinic10'])
 parser.add_argument('--output_dir', type=str, default='models')
 parser.add_argument('--batch_size', type=int, default=128)
+parser.add_argument('--zip_file', action='store_true', default=False)
+parser.add_argument('--lazy_load', action='store_true', default=False)
 parser.add_argument('--eval_batch_size', type=int, default=500)
 parser.add_argument('--epochs', type=int, default=600)
 parser.add_argument('--layers', type=int, default=6)
@@ -111,6 +113,8 @@ def get_builder(dataset):
         return build_cifar10
     elif dataset == 'cifar100':
         return build_cifar100
+    elif dataset == 'cinic10' :
+        return build_cinic10
     
 
 def build_cifar10(model_state_dict, optimizer_state_dict, **kwargs):
@@ -225,6 +229,70 @@ def main():
             is_best = True
         utils.save(args.output_dir, args, model, epoch, step, optimizer, best_acc_top1, is_best)
         
+
+def build_cinic10(model_state_dict, optimizer_state_dict, **kwargs):
+    epoch = kwargs.pop('epoch')
+
+    train_transform, valid_transform = utils._data_transforms_cifar10(args.cutout_size)
+    if args.zip_file:
+        logging.info('Loading data from zip file')
+        traindir = os.path.join(args.data, 'train.zip')
+        validdir = os.path.join(args.data, 'valid.zip')
+        if args.lazy_load:
+            train_data = utils.ZipDataset(traindir, train_transform)
+            valid_data = utils.ZipDataset(validdir, valid_transform)
+        else:
+            logging.info('Loading data into memory')
+            train_data = utils.InMemoryZipDataset(traindir, train_transform, num_workers=32)
+            valid_data = utils.InMemoryZipDataset(validdir, valid_transform, num_workers=32)
+    else:
+        logging.info('Loading data from directory')
+        traindir = os.path.join(args.data, 'train')
+        validdir = os.path.join(args.data, 'valid')
+        if args.lazy_load:
+            train_data = dset.ImageFolder(traindir, train_transform)
+            valid_data = dset.ImageFolder(validdir, valid_transform)
+        else:
+            logging.info('Loading data into memory')
+            train_data = utils.InMemoryDataset(traindir, train_transform, num_workers=32)
+            valid_data = utils.InMemoryDataset(validdir, valid_transform, num_workers=32)
+    
+    logging.info('Found %d in training data', len(train_data))
+    logging.info('Found %d in validation data', len(valid_data))
+
+    # train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
+    # valid_data = dset.CIFAR10(root=args.data, train=False, download=True, transform=valid_transform)
+    
+    train_queue = torch.utils.data.DataLoader(
+        train_data, batch_size=args.batch_size, shuffle=True, pin_memory=True, num_workers=16)
+    valid_queue = torch.utils.data.DataLoader(
+        valid_data, batch_size=args.eval_batch_size, shuffle=False, pin_memory=True, num_workers=16)
+
+    model = NASNetworkCIFAR(args, 10, args.layers, args.nodes, args.channels, args.keep_prob, args.drop_path_keep_prob,
+                       args.use_aux_head, args.steps, args.arch)
+    logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
+    if model_state_dict is not None:
+        model.load_state_dict(model_state_dict)
+    
+    if torch.cuda.device_count() > 1:
+        logging.info("Use %d %s", torch.cuda.device_count(), "GPUs !")
+        model = nn.DataParallel(model)
+    model = model.cuda()
+
+    train_criterion = nn.CrossEntropyLoss().cuda()
+    eval_criterion = nn.CrossEntropyLoss().cuda()
+
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        args.lr_max,
+        momentum=0.9,
+        weight_decay=args.l2_reg,
+    )
+    if optimizer_state_dict is not None:
+        optimizer.load_state_dict(optimizer_state_dict)
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, float(args.epochs), args.lr_min, epoch)
+    return train_queue, valid_queue, model, train_criterion, eval_criterion, optimizer, scheduler
 
 if __name__ == '__main__':
     main()

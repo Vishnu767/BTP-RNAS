@@ -21,11 +21,6 @@ class pdf:
         self.sigma = 10*torch.eye(T*d).cuda()
         self.PDF = MultivariateNormal(self.mu, self.sigma)
 
-    def init_sigma(self):
-        for i in range(T*d):
-            self.sigma[i][i] += 1
-        self.PDF = MultivariateNormal(self.mu, self.sigma)
-
     def f(self, x):
         return self.PDF.log_prob(x)
 
@@ -38,12 +33,6 @@ class pdf:
               self.sigma[i][j] = 0
             # self.sigma[i][j] = abs(self.sigma[i][j]) #New added line ...might not require
         self.PDF = MultivariateNormal(self.mu, self.sigma)
-    
-    def change_sigma(self):
-        for i in range(T*d):
-           self.sigma[i][i] = 0.25
-        self.PDF = MultivariateNormal(self.mu, self.sigma)
-       
 
 def I(x, gamma):
     return torch.where(x>=gamma, x, 0)
@@ -86,8 +75,8 @@ def return_random_iids(N, prop_df, get_float=0):
 low = torch.tensor([-2, -2]).cuda()
 high = torch.tensor([5, 5]).cuda()
 N = 200
-quantile = 0.1
-K = 80
+quantile = 0.05
+K = 50
 gamma = torch.tensor(-1000).cuda()
 epsilon = torch.tensor(0.001).cuda()
 alpha = 1
@@ -119,12 +108,8 @@ def mras(arch,predict_lambda, get_performance):
     prop_df = pdf()
     for k in range(1, K + 1):
         if randomIids == None:
-            N = 200
+            N = 100
             randomIids = return_random_iids(N, prop_df)
-        # print("Random IIDs: ")
-        # for i,x in enumerate(randomIids):
-        #    print("IID ", i, ": ", x)
-        # randomIids = randomIids.cuda()
         HValues = [H(i,get_performance) for i in randomIids]
         HValues_X = [[iid,randomIids[i]] for i,iid in enumerate(HValues)]
         sortedHValues = sorted(HValues)
@@ -140,14 +125,24 @@ def mras(arch,predict_lambda, get_performance):
             gamma = currGamma
             N = int(alpha * N)
         prop_df.update(update_mu(XArray, gamma, k, prop_df, get_performance), update_sigma(XArray, gamma, k, prop_df, get_performance))
-        if k==1:
-           prop_df.init_sigma()
+
+        # Write the mean performance and sigma into separate files
+        f = open("mean.txt", "a")
+        f.write(str(H(prop_df.mu,get_performance).item()))
+        f.write("\n")
+        f.close()
+
+        f = open("sigma.txt", "a")
+        max_sigma = prop_df.sigma[0][0]
+        for ind in range(T*d):
+           max_sigma = max(max_sigma, prop_df.sigma[ind][ind])
+        f.write(str(max_sigma.item()))
+        f.write("\n")
+        f.close()
         randomIids = None
         
     print("Mean (mras.py): ", prop_df.mu)
-    print("Sigma (Before)(mras.py): ", prop_df.sigma)
-    prop_df.change_sigma()
-    print("Sigma (After)(mras.py): ", prop_df.sigma)
+    print("Sigma (mras.py): ", prop_df.sigma)
     print("Performance of Mean (mras.py): ", H(prop_df.mu, get_performance))
     final_samples = return_random_iids(299, prop_df)
     new_flattened_encoder_outputs = torch.tensor([]).cuda()
