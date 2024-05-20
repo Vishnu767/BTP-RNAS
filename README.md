@@ -1,1 +1,1 @@
-# Neural Architecture Optimization
+# Randomized Neural Architecture Search
