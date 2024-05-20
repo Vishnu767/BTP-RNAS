@@ -86,7 +86,7 @@ def compare(X, Y):
         return -1
     return 1
 
-def mras(arch,predict_lambda, get_performance):
+def enhancer(arch,predict_lambda, get_performance):
     global N
     global gamma
     global epsilon

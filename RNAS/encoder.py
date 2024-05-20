@@ -6,7 +6,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mras import mras
+from enhancer import enhancer
 
 
 
@@ -96,7 +96,7 @@ class Encoder(nn.Module):
     
     def infer_mras(self, input_variables, predict_lambda, direction='-'):
         encoder_outputs, encoder_hidden, arch_emb, predict_value = self(input_variables)
-        new_encoder_outputs = mras(encoder_outputs, predict_lambda, self.get_performance)
+        new_encoder_outputs = enhancer(encoder_outputs, predict_lambda, self.get_performance)
         new_encoder_outputs = F.normalize(new_encoder_outputs,2,dim=-1)
         new_arch_emb = torch.mean(new_encoder_outputs, dim=1)
         new_arch_emb = F.normalize(new_arch_emb,2,dim=-1)
