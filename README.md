@@ -44,7 +44,7 @@ On the transfer task of CINIC-10, RNASNet-WS achieved 91.48% top-1 accuracy, out
 
 On the Penn Treebank language modeling task, the RNN architecture discovered by RNASNet-WS achieved a test perplexity of 57.5, surpassing various neural architecture search methods like ENAS and being on par with state-of-the-art results.
 
-The code for PTB: (BTP-RNAS-RNN)[https://github.com/prathik8794/BTP-RNAS-RNN]
+The code for PTB: [BTP-RNAS-RNN](https://github.com/prathik8794/BTP-RNAS-RNN)
 
 See the paper for more details on the experimental setup and full results.
 
