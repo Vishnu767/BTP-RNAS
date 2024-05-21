@@ -1,9 +1,9 @@
 # Randomized Neural Architecture Search
 
-# Abstract #
+## Abstract
 Neural network architectures are very critical in determining optimal model performance across various datasets. Traditional approaches to architecture design often involve manual exploration or heuristic methods, which can be time-consuming and resource-intensive. In this paper, we propose a randomized neural architecture search algorithm aimed at efficiently discovering high-performing architectures. Our approach involves embedding the unstructured space of neural architectures within a manifold, enabling constrained exploration of architectures with promising performance potential. By diligently sampling architectures from regions exhibiting high performance values within this constrained space, our algorithm focuses its search efforts on promising candidates.
 
-# Requirements #
+## Requirements
 * Python 3.7.13+
 * PyTorch 1.13+
 * TorchVision 0.14+
